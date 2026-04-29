@@ -62,6 +62,23 @@ const TOOLS = [
         required: ['path', 'operation', 'content']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_files',
+      description: 'Search for files matching a pattern and optionally search their contents. Returns file paths and matching line numbers.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Regex pattern to search for in file contents' },
+          dir: { type: 'string', description: 'Directory to search in (defaults to current directory)' },
+          file_pattern: { type: 'string', description: 'Glob pattern to filter files (e.g., "*.js", "*.md")' },
+          max_results: { type: 'integer', description: 'Maximum number of results to return (default: 50)' }
+        },
+        required: ['pattern']
+      }
+    }
   }
 ];
 
@@ -130,6 +147,71 @@ async function edit_file({ path: filePath, operation, line, start_line, end_line
   return feedback;
 }
 
+async function search_files({ pattern, dir = '.', file_pattern = null, max_results = 50 }) {
+  const results = [];
+  const regex = new RegExp(pattern, 'i'); // case-insensitive by default
+
+  async function searchDir(currentDir) {
+    const entries = await fs.readdir(currentDir, { withFileTypes: true });
+    
+    for (const entry of entries) {
+      const fullPath = `${currentDir}/${entry.name}`;
+      
+      // Skip hidden directories and node_modules
+      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+      
+      // Apply file pattern filter if specified
+      if (file_pattern) {
+        const globRegex = globToRegex(file_pattern);
+        if (!globRegex.test(entry.name)) continue;
+      }
+      
+      if (entry.isDirectory()) {
+        await searchDir(fullPath);
+      } else {
+        try {
+          const content = await fs.readFile(fullPath, 'utf-8');
+          const lines = content.split(/\r?\n/);
+          
+          for (let i = 0; i < lines.length; i++) {
+            if (regex.test(lines[i])) {
+              results.push({
+                file: fullPath,
+                line: i + 1,
+                content: lines[i].trim()
+              });
+              
+              if (results.length >= max_results) return;
+            }
+          }
+        } catch (err) {
+          // Skip files we can't read (binary, permissions, etc.)
+        }
+      }
+    }
+  }
+
+  await searchDir(dir);
+
+  if (results.length === 0) {
+    return `No matches found for pattern "${pattern}"${file_pattern ? ` in files matching "${file_pattern}"` : ''}.`;
+  }
+
+  const output = results.map(r => `${r.file}:${r.line}: ${r.content}`).join('\n');
+  const total = results.length;
+  return `${output}\n\n---\nTotal: ${total} match(es) found.`;
+}
+
+// Helper to convert glob patterns to regex
+function globToRegex(glob) {
+  return new RegExp(
+    '^' + glob
+      .replace(/\./g, '\\.')
+      .replace(/\*/g, '.*')
+      .replace(/\?/g, '.') + '$'
+  );
+}
+
 async function executeTool(name, args) {
   try {
     switch (name) {
@@ -137,6 +219,7 @@ async function executeTool(name, args) {
       case 'read_file': return await read_file(args);
       case 'create_file': return await create_file(args);
       case 'edit_file': return await edit_file(args);
+      case 'search_files': return await search_files(args);
       default: return `Unknown tool: ${name}`;
     }
   } catch (err) {
