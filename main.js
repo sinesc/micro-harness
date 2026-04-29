@@ -173,13 +173,17 @@ async function main() {
 
     messages.push({ role: 'user', content: userPrompt });
 
-    let hasToolCalls = true;
-    while (hasToolCalls) {
+    let iteration = 0;
+    const MAX_ITERATIONS = 10; // Safety net against infinite loops
+
+    while (iteration < MAX_ITERATIONS) {
+      iteration++;
       try {
         const response = await fetchCompletion(messages);
         const msg = response.choices[0].message;
 
-        if (msg.tool_calls) {
+        // Fix: Use ?.length to avoid truthy empty arrays
+        if (msg.tool_calls?.length) {
           for (const tc of msg.tool_calls) {
             const args = JSON.parse(tc.function.arguments);
             const result = await executeTool(tc.function.name, args);
@@ -187,17 +191,18 @@ async function main() {
             messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
           }
         } else {
-          messages.push(msg);
-          console.log(msg.content);
-          hasToolCalls = false;
+          // Final text response
+          const finalContent = msg.content ?? '';
+          messages.push({ role: 'assistant', content: finalContent });
+          console.log(finalContent);
+          break; // Exit tool loop
         }
       } catch (err) {
         console.error(`\n❌ API Error: ${err.message}\n`);
-        hasToolCalls = false;
+        break;
       }
     }
   }
-
   rl.close();
 }
 
