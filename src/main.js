@@ -100,6 +100,12 @@ async function main() {
 
                 const msg = response.choices[0].message;
 
+                // If response has empty content and no tool_calls, check reasoning_content for embedded tool calls
+                if (!msg.content && !msg.tool_calls?.length && msg.reasoning_content?.includes('<tool_call>')) {
+                    messages.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_code>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
+                    continue;
+                }
+
                 // Fix: Use ?.length to avoid truthy empty arrays
                 if (msg.tool_calls?.length) {
                     // Display any text message the model included with the tool call
