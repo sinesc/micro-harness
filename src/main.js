@@ -12,7 +12,7 @@ so if you encounter any difficulty with the provided tools, please report the is
 The application uses nodejs, the entry point is in src/main.js .
 IMPORTANT RULES:
 1. Line numbers are 1-indexed.
-2. Line numbers remain stable across edits until you explicitly call read_file is called.
+2. Line numbers remain stable across edits until you explicitly call read_file.
 3. When using edit_file, specify operation: "insert" or "replace".
 4. For "insert": provide 'line' (1-indexed position to insert before) and 'content'.
 5. For "replace": provide 'start_line', 'end_line' (1-indexed, inclusive range) and 'content'.
@@ -78,11 +78,15 @@ async function main() {
 
                 // Fix: Use ?.length to avoid truthy empty arrays
                 if (msg.tool_calls?.length) {
+                    // Display any text message the model included with the tool call
+                    if (msg.content) {
+                        console.log(msg.content.trim());
+                    }
                     for (const tc of msg.tool_calls) {
                         const args = JSON.parse(tc.function.arguments);
                         // Display tool name and abbreviated arguments (limit each property to 10 chars)
                         const abbreviatedArgs = Object.fromEntries(
-                            Object.entries(args).map(([k, v]) => [k, String(v).slice(0, 10)])
+                            Object.entries(args).map(([k, v]) => [k, String(v).length > 10 ? String(v).slice(0, 10) + '...' : String(v)])
                         );
                         console.log(`🔧 Tool: ${tc.function.name}, Args: ${JSON.stringify(abbreviatedArgs)}`);
                         const result = await Tool.executeTool(tc.function.name, args);
@@ -93,7 +97,7 @@ async function main() {
                     // Final text response
                     const finalContent = msg.content ?? '';
                     messages.push({ role: 'assistant', content: finalContent });
-                    console.log(finalContent);
+                    console.log(finalContent.trim());
                     displayTokenUsage();
                     break; // Exit tool loop
                 }
