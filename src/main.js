@@ -16,9 +16,10 @@ IMPORTANT RULES:
 3. When using edit_file, specify operation: "insert" or "replace".
 4. For "insert": provide 'line' (1-indexed position to insert before) and 'content'.
 5. For "replace": provide 'start_line', 'end_line' (1-indexed, inclusive range) and 'content'.
-6. If you need to know the current state of a file, call read_file.
-7. Always provide a short concise sentence explaining the intent of your next action, e.g. "Creating project file structure.", "Reading files required to understand the issue.", ...
-7. Always return concise, useful feedback on changes made.`;
+6. When editing, do not include the line number and tab character code prefixed by the read_file tool.
+7. If you need to know the current state of a file, call read_file.
+8. Always provide a short concise sentence explaining the intent of your next action, e.g. "Creating project file structure.", "Reading files required to understand the issue.", ...
+9. Always return concise, useful feedback on changes made.`;
 
 // Token usage tracking
 let totalPromptTokens = 0;
@@ -102,15 +103,20 @@ async function main() {
 
                 // If response has empty content and no tool_calls, check reasoning_content for embedded tool calls
                 if (!msg.content && !msg.tool_calls?.length && msg.reasoning_content?.includes('<tool_call>')) {
-                    messages.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_code>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
+                    messages.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_call>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
                     continue;
                 }
 
                 // Fix: Use ?.length to avoid truthy empty arrays
                 if (msg.tool_calls?.length) {
                     // Display any text message the model included with the tool call
-                    messages.push({ role: 'assistant', content: msg.content }); // TODO: unclear whether this is helpful/expected
+                    const assistantMsg = { role: 'assistant', content: msg.content };
+                    if (msg.reasoning_content) assistantMsg.reasoning_content = msg.reasoning_content;
+                    messages.push(assistantMsg);
+
+                    // Display assistant content first if present
                     displayMessage('assistant', msg.content);
+
                     for (const tc of msg.tool_calls) {
                         const args = JSON.parse(tc.function.arguments);
                         // Display tool name and abbreviated arguments (limit each property to 10 chars)
@@ -125,7 +131,9 @@ async function main() {
                 } else {
                     // Final text response
                     const finalContent = msg.content ?? '';
-                    messages.push({ role: 'assistant', content: finalContent });
+                    const finalMsg = { role: 'assistant', content: finalContent };
+                    if (msg.reasoning_content) finalMsg.reasoning_content = msg.reasoning_content;
+                    messages.push(finalMsg);
                     displayMessage('assistant', finalContent);
                     displayTokenUsage();
                     break; // Exit tool loop
