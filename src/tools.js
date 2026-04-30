@@ -1,5 +1,9 @@
 import fs from 'fs/promises';
 import crypto from 'crypto';
+import { exec } from 'child_process';
+import util from 'util';
+
+const execAsync = util.promisify(exec);
 
 export class Tool {
     constructor() {
@@ -96,6 +100,20 @@ export class Tool {
                         max_results: { type: 'integer', description: 'Maximum number of results to return (default: 50)' }
                     },
                     required: ['pattern']
+                }
+            }
+        },
+        {
+            type: 'function',
+            function: {
+                name: 'syntax_check',
+                description: 'Check JavaScript syntax for a file using `node -c`. Returns success or error message.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        path: { type: 'string', description: 'File path to check (must be a .js file)' }
+                    },
+                    required: ['path']
                 }
             }
         }
@@ -282,7 +300,17 @@ export class Tool {
         return `${output}\n\n---\nTotal: ${total} match(es) found.`;
     }
 
-    // --- Private helper methods ---
+    async syntax_check({ path: filePath }) {
+        try {
+            const { stdout, stderr } = await execAsync(`node -c "${filePath}"`);
+            if (stderr) {
+                return stderr.trim();
+            }
+            return `Syntax check passed for ${filePath}.`;
+        } catch (err) {
+            return `Syntax error in ${filePath}: ${err.stderr?.trim() || err.message}`;
+        }
+    }
 
     #getOffset(offsetMap, lineNum) {
         let offset = 0;
@@ -339,6 +367,7 @@ export class Tool {
                 case 'edit_file': return await this.edit_file(args);
                 case 'undo': return await this.undo();
                 case 'search_files': return await this.search_files(args);
+                case 'syntax_check': return await this.syntax_check(args);
                 default: return `Unknown tool: ${name}`;
             }
         } catch (err) {
