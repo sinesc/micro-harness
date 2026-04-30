@@ -1,11 +1,18 @@
 import fs from 'fs/promises';
 import crypto from 'crypto';
 
+// Track cumulative offsets per file: Map<filePath, Map<lineNum, offset>>
+const fileOffsetMaps = new Map();
+
+function getFileOffsetMap(filePath) {
+    if (!fileOffsetMaps.has(filePath)) {
+        fileOffsetMaps.set(filePath, new Map());
+    }
+    return fileOffsetMaps.get(filePath);
+}
+
 // File edit history for undo
 const editHistory = [];
-
-// Track cumulative offset for each line number
-const lineOffsetMap = new Map();
 
 // Track file checksums to detect external changes
 const fileChecksums = new Map();
@@ -33,7 +40,7 @@ export class Tool {
             type: 'function',
             function: {
                 name: 'read_file',
-                description: 'Read file contents. Call this to refresh line numbers and current state.',
+                description: 'Read file contents. The output includes authoritative line numbers followed by a tab character followed by the line content.',
                 parameters: {
                     type: 'object',
                     properties: { path: { type: 'string', description: 'File path' } },
@@ -69,7 +76,7 @@ export class Tool {
                         line: { type: 'integer', description: 'Line number for insert (1-indexed)' },
                         start_line: { type: 'integer', description: 'Start line for replace (1-indexed)' },
                         end_line: { type: 'integer', description: 'End line for replace (1-indexed, inclusive)' },
-                        content: { type: 'string', description: 'New text content' }
+                        content: { type: 'string', description: 'File content' }
                     },
                     required: ['path', 'operation', 'content']
                 }
@@ -115,9 +122,13 @@ export class Tool {
 
     static async read_file({ path: filePath }) {
         const content = await fs.readFile(filePath, 'utf-8');
-        lineOffsetMap.clear();  // Reset offsets since we re-read the file
+        // Reset offsets for this file since we re-read it
+        if (fileOffsetMaps.has(filePath)) {
+            fileOffsetMaps.delete(filePath);
+        }
         fileChecksums.set(filePath, computeChecksum(content));  // Update checksum on read
-        return content;
+        let line = 1;
+        return content.split(/\r?\n/).map((text, index) => `${index+1}\t${text}`).join("\n");
     }
 
     static async create_file({ path: filePath, content }) {
@@ -128,28 +139,29 @@ export class Tool {
 
     static async edit_file({ path: filePath, operation, line, start_line, end_line, content }) {
         const fileContent = await fs.readFile(filePath, 'utf-8');
-        
+
         // Check for external changes before editing
         const previousChecksum = fileChecksums.get(filePath);
         const currentChecksum = computeChecksum(fileContent);
-        
+
         if (previousChecksum && previousChecksum !== currentChecksum) {
-            return `ERROR: File '${filePath}' has been modified externally since it was last read. The checksum changed from '${previousChecksum}' to '${currentChecksum}'. Please call read_file first to refresh the file contents, then retry the edit.`;
+            return `ERROR: File '${filePath}' has been modified externally since it was last read. Please call read_file first to refresh the file contents, then retry the edit.`;
         }
-        
+
+        const offsetMap = getFileOffsetMap(filePath);
         let lines = fileContent.split(/\r?\n/);
         let feedback = '';
 
-        // Before each edit:
+        // Before each edit: save state for undo
         editHistory.push({
             path: filePath,
             content: fileContent,
-            offsetMap: new Map(lineOffsetMap)
+            offsetMap: new Map(offsetMap)
         });
 
         if (operation === 'insert') {
             // Calculate actual line position using offset
-            const offset = this.#getOffset(line);
+            const offset = Tool.#getOffset(offsetMap, line);
             const actualLine = line + offset;
             if (actualLine > lines.length + 1) {
                 throw new Error(`Line ${line} is out of bounds (file has ${lines.length} lines)`);
@@ -159,13 +171,13 @@ export class Tool {
             lines.splice(insertIdx, 0, ...newLines);
 
             // Update offset map
-            this.#updateOffsetsAfterInsert(line, newLines.length);
+            Tool.#updateOffsetsAfterInsert(offsetMap, line, newLines.length);
 
             feedback = `Inserted ${newLines.length} line(s) at line ${line} (now at line ${actualLine}).`;
         } else if (operation === 'replace') {
             // Calculate actual line positions using offsets
-            const startOffset = this.#getOffset(start_line);
-            const endOffset = this.#getOffset(end_line);
+            const startOffset = Tool.#getOffset(offsetMap, start_line);
+            const endOffset = Tool.#getOffset(offsetMap, end_line);
             const actualStart = start_line + startOffset;
             const actualEnd = end_line + endOffset;
 
@@ -176,7 +188,7 @@ export class Tool {
             lines.splice(startIdx, count, ...newLines);
 
             // Update offset map
-            this.#updateOffsetsAfterReplace(start_line, end_line, newLines.length);
+            Tool.#updateOffsetsAfterReplace(offsetMap, start_line, end_line, newLines.length);
 
             feedback = `Replaced ${count} line(s) (${start_line}-${end_line}) with ${newLines.length} line(s).`;
         } else {
@@ -185,10 +197,10 @@ export class Tool {
 
         const newContent = lines.join('\n');
         await fs.writeFile(filePath, newContent, 'utf-8');
-        
+
         // Update checksum after successful edit
         fileChecksums.set(filePath, computeChecksum(newContent));
-        
+
         return feedback;
     }
 
@@ -205,12 +217,9 @@ export class Tool {
         // Write the file back to its previous state
         await fs.writeFile(filePath, content, 'utf-8');
 
-        // Restore the offset map
-        lineOffsetMap.clear();
-        for (const [line, offset] of offsetMap) {
-            lineOffsetMap.set(line, offset);
-        }
-        
+        // Restore the offset map for this file
+        fileOffsetMaps.set(filePath, new Map(offsetMap));
+
         // Restore the checksum
         fileChecksums.set(filePath, computeChecksum(content));
 
@@ -232,7 +241,7 @@ export class Tool {
 
                 // Apply file pattern filter if specified
                 if (file_pattern) {
-                    const globRegex = this.#globToRegex(file_pattern);
+                    const globRegex = Tool.#globToRegex(file_pattern);
                     if (!globRegex.test(entry.name)) continue;
                 }
 
@@ -274,9 +283,9 @@ export class Tool {
 
     // --- Private helper functions ---
 
-    #getOffset(lineNum) {
+    static #getOffset(offsetMap, lineNum) {
         let offset = 0;
-        for (const [line, off] of lineOffsetMap) {
+        for (const [line, off] of offsetMap) {
             if (line <= lineNum) {
                 offset = off;
             }
@@ -284,32 +293,32 @@ export class Tool {
         return offset;
     }
 
-    #updateOffsetsAfterInsert(line, numLines) {
+    static #updateOffsetsAfterInsert(offsetMap, line, numLines) {
         // All lines >= line get offset +numLines
-        for (const [originalLine] of lineOffsetMap) {
+        for (const [originalLine] of offsetMap) {
             if (originalLine >= line) {
-                lineOffsetMap.set(originalLine, lineOffsetMap.get(originalLine) + numLines);
+                offsetMap.set(originalLine, offsetMap.get(originalLine) + numLines);
             }
         }
         // Also mark new lines as having 0 offset from this point
         for (let i = 0; i < numLines; i++) {
-            lineOffsetMap.set(line + i, 0);
+            offsetMap.set(line + i, 0);
         }
     }
 
-    #updateOffsetsAfterReplace(startLine, endLine, newLineCount) {
+    static #updateOffsetsAfterReplace(offsetMap, startLine, endLine, newLineCount) {
         const replacedCount = endLine - startLine + 1;
         const netChange = newLineCount - replacedCount;
 
         // All lines > endLine get offset +netChange
-        for (const [originalLine] of lineOffsetMap) {
+        for (const [originalLine] of offsetMap) {
             if (originalLine > endLine) {
-                lineOffsetMap.set(originalLine, lineOffsetMap.get(originalLine) + netChange);
+                offsetMap.set(originalLine, offsetMap.get(originalLine) + netChange);
             }
         }
     }
 
-    #globToRegex(glob) {
+    static #globToRegex(glob) {
         return new RegExp(
             '^' + glob
                 .replace(/\./g, '\\.')
@@ -323,12 +332,12 @@ export class Tool {
     static async executeTool(name, args) {
         try {
             switch (name) {
-                case 'list_files': return await this.list_files(args);
-                case 'read_file': return await this.read_file(args);
-                case 'create_file': return await this.create_file(args);
-                case 'edit_file': return await this.edit_file(args);
-                case 'undo': return await this.undo();
-                case 'search_files': return await this.search_files(args);
+                case 'list_files': return await Tool.list_files(args);
+                case 'read_file': return await Tool.read_file(args);
+                case 'create_file': return await Tool.create_file(args);
+                case 'edit_file': return await Tool.edit_file(args);
+                case 'undo': return await Tool.undo();
+                case 'search_files': return await Tool.search_files(args);
                 default: return `Unknown tool: ${name}`;
             }
         } catch (err) {
