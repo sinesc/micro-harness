@@ -25,6 +25,9 @@ let totalPromptTokens = 0;
 let totalCompletionTokens = 0;
 let totalTokens = 0;
 
+// Message display state
+let lastMessageType = null;
+
 // Instantiate Tool
 const tool = new Tool();
 
@@ -50,11 +53,22 @@ function displayTokenUsage() {
     console.log(`\n📊 Token Usage: ${totalTokens} total (${totalPromptTokens} prompt + ${totalCompletionTokens} completion) | Context: ${totalPromptTokens}/${CONTEXT_WINDOW} (${remaining} remaining)\n`);
 }
 
-function displayMessage(message) {
-    message = (message || '').trim();
-    if (message !== '') {
-        console.log(message);
+function displayMessage(role, content) {
+    content = (content || '').trim();
+    if (content === '') return;
+
+    const typeLabel = {
+        system: '🤖 System',
+        user: '👤 User',
+        assistant: '🤖 Assistant',
+        tool: '🔧 Tool'
+    }[role] || role;
+
+    if (lastMessageType !== null && lastMessageType !== role) {
+        console.log('');
     }
+    console.log(`${typeLabel}: ${content}`);
+    lastMessageType = role;
 }
 
 async function main() {
@@ -79,9 +93,9 @@ async function main() {
 
                 // Track token usage
                 if (response.usage) {
-                    totalPromptTokens += response.usage.prompt_tokens || 0;
-                    totalCompletionTokens += response.usage.completion_tokens || 0;
-                    totalTokens += response.usage.total_tokens || 0;
+                    totalPromptTokens = response.usage.prompt_tokens || 0;
+                    totalCompletionTokens = response.usage.completion_tokens || 0;
+                    totalTokens = response.usage.total_tokens || 0;
                 }
 
                 const msg = response.choices[0].message;
@@ -90,14 +104,14 @@ async function main() {
                 if (msg.tool_calls?.length) {
                     // Display any text message the model included with the tool call
                     messages.push({ role: 'assistant', content: msg.content }); // TODO: unclear whether this is helpful/expected
-                    displayMessage(msg.content);
+                    displayMessage('assistant', msg.content);
                     for (const tc of msg.tool_calls) {
                         const args = JSON.parse(tc.function.arguments);
                         // Display tool name and abbreviated arguments (limit each property to 10 chars)
                         const abbreviatedArgs = Object.fromEntries(
                             Object.entries(args).map(([k, v]) => [k, String(v).length > 10 ? String(v).slice(0, 10) + '...' : String(v)])
                         );
-                        console.log(`🔧 Tool: ${tc.function.name}, Args: ${JSON.stringify(abbreviatedArgs)}`);
+                        displayMessage('tool', `${tc.function.name}, Args: ${JSON.stringify(abbreviatedArgs)}`);
                         const result = await tool.executeTool(tc.function.name, args);
                         messages.push({ role: 'assistant', content: null, tool_calls: [tc] });
                         messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
@@ -106,7 +120,7 @@ async function main() {
                     // Final text response
                     const finalContent = msg.content ?? '';
                     messages.push({ role: 'assistant', content: finalContent });
-                    displayMessage(finalContent);
+                    displayMessage('assistant', finalContent);
                     displayTokenUsage();
                     break; // Exit tool loop
                 }
