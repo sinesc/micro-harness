@@ -116,7 +116,7 @@ export class Tool {
 
         if (operation === 'insert') {
             // Calculate actual line position using offset
-            const offset = this.getOffset(line);
+            const offset = this.#getOffset(line);
             const actualLine = line + offset;
             if (actualLine > lines.length + 1) {
                 throw new Error(`Line ${line} is out of bounds (file has ${lines.length} lines)`);
@@ -126,13 +126,13 @@ export class Tool {
             lines.splice(insertIdx, 0, ...newLines);
 
             // Update offset map
-            this.updateOffsetsAfterInsert(line, newLines.length);
+            this.#updateOffsetsAfterInsert(line, newLines.length);
 
             feedback = `Inserted ${newLines.length} line(s) at line ${line} (now at line ${actualLine}).`;
         } else if (operation === 'replace') {
             // Calculate actual line positions using offsets
-            const startOffset = this.getOffset(start_line);
-            const endOffset = this.getOffset(end_line);
+            const startOffset = this.#getOffset(start_line);
+            const endOffset = this.#getOffset(end_line);
             const actualStart = start_line + startOffset;
             const actualEnd = end_line + endOffset;
 
@@ -143,7 +143,7 @@ export class Tool {
             lines.splice(startIdx, count, ...newLines);
 
             // Update offset map
-            this.updateOffsetsAfterReplace(start_line, end_line, newLines.length);
+            this.#updateOffsetsAfterReplace(start_line, end_line, newLines.length);
 
             feedback = `Replaced ${count} line(s) (${start_line}-${end_line}) with ${newLines.length} line(s).`;
         } else {
@@ -170,7 +170,7 @@ export class Tool {
 
                 // Apply file pattern filter if specified
                 if (file_pattern) {
-                    const globRegex = this.globToRegex(file_pattern);
+                    const globRegex = this.#globToRegex(file_pattern);
                     if (!globRegex.test(entry.name)) continue;
                 }
 
@@ -210,9 +210,9 @@ export class Tool {
         return `${output}\n\n---\nTotal: ${total} match(es) found.`;
     }
 
-    // --- Helper functions ---
+    // --- Private helper functions ---
 
-    static getOffset(lineNum) {
+    #getOffset(lineNum) {
         let offset = 0;
         for (const [line, off] of lineOffsetMap) {
             if (line <= lineNum) {
@@ -222,7 +222,7 @@ export class Tool {
         return offset;
     }
 
-    static updateOffsetsAfterInsert(line, numLines) {
+    #updateOffsetsAfterInsert(line, numLines) {
         // All lines >= line get offset +numLines
         for (const [originalLine] of lineOffsetMap) {
             if (originalLine >= line) {
@@ -235,7 +235,7 @@ export class Tool {
         }
     }
 
-    static updateOffsetsAfterReplace(startLine, endLine, newLineCount) {
+    #updateOffsetsAfterReplace(startLine, endLine, newLineCount) {
         const replacedCount = endLine - startLine + 1;
         const netChange = newLineCount - replacedCount;
 
@@ -247,7 +247,7 @@ export class Tool {
         }
     }
 
-    static globToRegex(glob) {
+    #globToRegex(glob) {
         return new RegExp(
             '^' + glob
                 .replace(/\./g, '\\.')

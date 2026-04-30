@@ -6,7 +6,8 @@ const LM_STUDIO_URL = 'http://10.13.37.110:1234';
 
 const SYSTEM_PROMPT = `You are a coding assistant operating in a terminal harness. You have access to file tools.
 CURRENT SITUATION: The code you are working on is the coding harness you are operating in. The overall goal is to improve the harness,
-so if you encounter any difficulty with the provided tools, please report the issue and wait for user feedback. Do not try to work around the problem with another tool.
+so if you encounter any difficulty with the provided tools, please report the issue and wait for user feedback.
+**Do not try to work around issues with one tool by using another tool.**
 IMPORTANT RULES:
 1. Line numbers are 1-indexed.
 2. Line numbers remain stable across edits until you explicitly call read_file on the file.
@@ -58,6 +59,11 @@ async function main() {
                 if (msg.tool_calls?.length) {
                     for (const tc of msg.tool_calls) {
                         const args = JSON.parse(tc.function.arguments);
+                        // Display tool name and abbreviated arguments (limit each property to 10 chars)
+                        const abbreviatedArgs = Object.fromEntries(
+                            Object.entries(args).map(([k, v]) => [k, String(v).slice(0, 10)])
+                        );
+                        console.log(`🔧 Tool: ${tc.function.name}, Args: ${JSON.stringify(abbreviatedArgs)}`);
                         const result = await Tool.executeTool(tc.function.name, args);
                         messages.push({ role: 'assistant', content: null, tool_calls: [tc] });
                         messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
