@@ -69,6 +69,18 @@ export class Tool {
         {
             type: 'function',
             function: {
+                name: 'undo',
+                description: 'Undo the last edit_file operation, restoring the file to its previous state.',
+                parameters: {
+                    type: 'object',
+                    properties: {},
+                    required: []
+                }
+            }
+        },
+        {
+            type: 'function',
+            function: {
                 name: 'search_files',
                 description: 'Search for files matching a pattern and optionally search their contents. Returns file paths and matching line numbers.',
                 parameters: {
@@ -110,6 +122,7 @@ export class Tool {
 
         // Before each edit:
         editHistory.push({
+            path: filePath,
             content: fileContent,
             offsetMap: new Map(lineOffsetMap)
         });
@@ -153,6 +166,28 @@ export class Tool {
         const newContent = lines.join('\n');
         await fs.writeFile(filePath, newContent, 'utf-8');
         return feedback;
+    }
+
+    static async undo() {
+        if (editHistory.length === 0) {
+            return 'No edits to undo.';
+        }
+
+        const lastEdit = editHistory.pop();
+        const filePath = lastEdit.path;
+        const content = lastEdit.content;
+        const offsetMap = lastEdit.offsetMap;
+
+        // Write the file back to its previous state
+        await fs.writeFile(filePath, content, 'utf-8');
+
+        // Restore the offset map
+        lineOffsetMap.clear();
+        for (const [line, offset] of offsetMap) {
+            lineOffsetMap.set(line, offset);
+        }
+
+        return `Undid the last edit on ${filePath}.`;
     }
 
     static async search_files({ pattern, dir = '.', file_pattern = null, max_results = 50 }) {
@@ -265,6 +300,7 @@ export class Tool {
                 case 'read_file': return await this.read_file(args);
                 case 'create_file': return await this.create_file(args);
                 case 'edit_file': return await this.edit_file(args);
+                case 'undo': return await this.undo();
                 case 'search_files': return await this.search_files(args);
                 default: return `Unknown tool: ${name}`;
             }
