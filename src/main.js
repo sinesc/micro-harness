@@ -25,6 +25,9 @@ let totalPromptTokens = 0;
 let totalCompletionTokens = 0;
 let totalTokens = 0;
 
+// Instantiate Tool
+const tool = new Tool();
+
 async function fetchCompletion(messages) {
     const res = await fetch(`${LM_STUDIO_URL}/v1/chat/completions`, {
         method: 'POST',
@@ -45,6 +48,13 @@ async function fetchCompletion(messages) {
 function displayTokenUsage() {
     const remaining = Math.max(0, CONTEXT_WINDOW - totalPromptTokens);
     console.log(`\n📊 Token Usage: ${totalTokens} total (${totalPromptTokens} prompt + ${totalCompletionTokens} completion) | Context: ${totalPromptTokens}/${CONTEXT_WINDOW} (${remaining} remaining)\n`);
+}
+
+function displayMessage(message) {
+    message = (message || '').trim();
+    if (message !== '') {
+        console.log(message);
+    }
 }
 
 async function main() {
@@ -79,9 +89,8 @@ async function main() {
                 // Fix: Use ?.length to avoid truthy empty arrays
                 if (msg.tool_calls?.length) {
                     // Display any text message the model included with the tool call
-                    if (msg.content) {
-                        console.log(msg.content.trim());
-                    }
+                    messages.push({ role: 'assistant', content: msg.content }); // TODO: unclear whether this is helpful/expected
+                    displayMessage(msg.content);
                     for (const tc of msg.tool_calls) {
                         const args = JSON.parse(tc.function.arguments);
                         // Display tool name and abbreviated arguments (limit each property to 10 chars)
@@ -89,7 +98,7 @@ async function main() {
                             Object.entries(args).map(([k, v]) => [k, String(v).length > 10 ? String(v).slice(0, 10) + '...' : String(v)])
                         );
                         console.log(`🔧 Tool: ${tc.function.name}, Args: ${JSON.stringify(abbreviatedArgs)}`);
-                        const result = await Tool.executeTool(tc.function.name, args);
+                        const result = await tool.executeTool(tc.function.name, args);
                         messages.push({ role: 'assistant', content: null, tool_calls: [tc] });
                         messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
                     }
@@ -97,7 +106,7 @@ async function main() {
                     // Final text response
                     const finalContent = msg.content ?? '';
                     messages.push({ role: 'assistant', content: finalContent });
-                    console.log(finalContent.trim());
+                    displayMessage(finalContent);
                     displayTokenUsage();
                     break; // Exit tool loop
                 }
