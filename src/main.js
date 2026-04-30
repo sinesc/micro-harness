@@ -9,14 +9,16 @@ const SYSTEM_PROMPT = `You are a coding assistant operating in a terminal harnes
 CURRENT SITUATION: The code you are working on is the coding harness you are operating in. The overall goal is to improve the harness,
 so if you encounter any difficulty with the provided tools, please report the issue and wait for user feedback.
 **Do not try to work around issues with one tool by using another tool.**
+The application uses nodejs, the entry point is in src/main.js .
 IMPORTANT RULES:
 1. Line numbers are 1-indexed.
 2. Line numbers remain stable across edits until you explicitly call read_file is called.
 3. When using edit_file, specify operation: "insert" or "replace".
 4. For "insert": provide 'line' (1-indexed position to insert before) and 'content'.
 5. For "replace": provide 'start_line', 'end_line' (1-indexed, inclusive range) and 'content'.
-6. Always return concise, useful feedback on changes made.
-7. If you need to know the current state of a file, call read_file.`;
+6. If you need to know the current state of a file, call read_file.
+7. Always provide a short concise sentence explaining the intent of your next action, e.g. "Creating project file structure.", "Reading files required to understand the issue.", ...
+7. Always return concise, useful feedback on changes made.`;
 
 // Token usage tracking
 let totalPromptTokens = 0;
@@ -32,7 +34,7 @@ async function fetchCompletion(messages) {
             messages,
             tools: Tool.TOOLS,
             tool_choice: 'auto',
-            temperature: 0.1,
+            temperature: 0.6,
             stream: false
         })
     });

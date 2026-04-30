@@ -1,10 +1,19 @@
 import fs from 'fs/promises';
+import crypto from 'crypto';
 
 // File edit history for undo
 const editHistory = [];
 
 // Track cumulative offset for each line number
 const lineOffsetMap = new Map();
+
+// Track file checksums to detect external changes
+const fileChecksums = new Map();
+
+// Compute SHA-256 checksum of file content (shortened for readability)
+function computeChecksum(content) {
+    return crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
+}
 
 export class Tool {
     static TOOLS = [
@@ -107,16 +116,27 @@ export class Tool {
     static async read_file({ path: filePath }) {
         const content = await fs.readFile(filePath, 'utf-8');
         lineOffsetMap.clear();  // Reset offsets since we re-read the file
+        fileChecksums.set(filePath, computeChecksum(content));  // Update checksum on read
         return content;
     }
 
     static async create_file({ path: filePath, content }) {
         await fs.writeFile(filePath, content, 'utf-8');
+        fileChecksums.set(filePath, computeChecksum(content));  // Set initial checksum
         return `Created file ${filePath} with ${content.split(/\r?\n/).length} line(s).`;
     }
 
     static async edit_file({ path: filePath, operation, line, start_line, end_line, content }) {
         const fileContent = await fs.readFile(filePath, 'utf-8');
+        
+        // Check for external changes before editing
+        const previousChecksum = fileChecksums.get(filePath);
+        const currentChecksum = computeChecksum(fileContent);
+        
+        if (previousChecksum && previousChecksum !== currentChecksum) {
+            return `ERROR: File '${filePath}' has been modified externally since it was last read. The checksum changed from '${previousChecksum}' to '${currentChecksum}'. Please call read_file first to refresh the file contents, then retry the edit.`;
+        }
+        
         let lines = fileContent.split(/\r?\n/);
         let feedback = '';
 
@@ -165,6 +185,10 @@ export class Tool {
 
         const newContent = lines.join('\n');
         await fs.writeFile(filePath, newContent, 'utf-8');
+        
+        // Update checksum after successful edit
+        fileChecksums.set(filePath, computeChecksum(newContent));
+        
         return feedback;
     }
 
@@ -186,6 +210,9 @@ export class Tool {
         for (const [line, offset] of offsetMap) {
             lineOffsetMap.set(line, offset);
         }
+        
+        // Restore the checksum
+        fileChecksums.set(filePath, computeChecksum(content));
 
         return `Undid the last edit on ${filePath}.`;
     }
