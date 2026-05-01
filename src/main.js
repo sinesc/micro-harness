@@ -5,6 +5,7 @@ import { Tool } from './tools.js';
 
 const LM_STUDIO_URL = 'http://10.13.37.110:1234';
 const CONTEXT_WINDOW = 131072; // Default context window size
+let currentModel = 'local-model';
 const CONTEXT_FILE = 'context.json';
 const SYSTEM_PROMPT = `You are a coding assistant operating in a terminal harness. You have access to file tools.
 IMPORTANT RULES:
@@ -60,7 +61,7 @@ async function fetchCompletion(messages) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            model: 'local-model',
+            model: currentModel,
             messages,
             tools: Tool.TOOLS,
             tool_choice: 'auto',
@@ -121,8 +122,39 @@ async function main() {
                     const res = await fetch(`${LM_STUDIO_URL}/v1/models`);
                     if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
                     const data = await res.json();
-                    const models = data.data?.map(m => m.id) || [];
-                    console.log(`\n📋 Available Models:\n${models.map(m => `  - ${m}`).join('\n')}\n`);
+                    const apiModels = (data.data?.map(m => m.id) || []).sort();
+                    const models = ['local-model', ...apiModels];
+                    console.log(`\n📋 Available Models (current: ${currentModel}):\n${models.map((m, i) => `  ${i}. ${m}${m === currentModel ? ' (active)' : ''}`).join('\n')}\n`);
+                } catch (err) {
+                    console.log(`\n❌ Failed to fetch models: ${err.message}\n`);
+                }
+            } else if (cmd === 'model') {
+                if (!args) {
+                    console.log(`\nCurrent model: ${currentModel}\n`);
+                    continue;
+                }
+                try {
+                    const res = await fetch(`${LM_STUDIO_URL}/v1/models`);
+                    if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
+                    const data = await res.json();
+                    const apiModels = (data.data?.map(m => m.id) || []).sort();
+                    const models = ['local-model', ...apiModels];
+
+                    // Check if args is a valid index
+                    const index = parseInt(args, 10);
+                    let selectedModel = null;
+                    if (!isNaN(index) && index >= 0 && index < models.length) {
+                        selectedModel = models[index];
+                    } else if (models.includes(args)) {
+                        selectedModel = args;
+                    }
+
+                    if (selectedModel) {
+                        currentModel = selectedModel;
+                        console.log(`\n✅ Switched to model: ${currentModel}\n`);
+                    } else {
+                        console.log(`\n❌ Invalid model or index. Use /models to see available options.\n`);
+                    }
                 } catch (err) {
                     console.log(`\n❌ Failed to fetch models: ${err.message}\n`);
                 }
