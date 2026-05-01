@@ -1,25 +1,20 @@
 #!/usr/bin/env node
 import readline from 'readline';
+import fs from 'fs/promises';
 import { Tool } from './tools.js';
 
 const LM_STUDIO_URL = 'http://10.13.37.110:1234';
 const CONTEXT_WINDOW = 131072; // Default context window size
-
+const CONTEXT_FILE = 'context.json';
 const SYSTEM_PROMPT = `You are a coding assistant operating in a terminal harness. You have access to file tools.
-CURRENT SITUATION: The code you are working on is the coding harness you are operating in. The overall goal is to improve the harness,
-so if you encounter any difficulty with the provided tools, please report the issue and wait for user feedback.
-**Do not try to work around issues with one tool by using another tool.**
-The application uses nodejs, the entry point is in src/main.js .
 IMPORTANT RULES:
-1. Line numbers are 1-indexed.
-2. Line numbers remain stable across edits until you explicitly call read_file.
-3. When using edit_file, specify operation: "insert" or "replace".
-4. For "insert": provide 'line' (1-indexed position to insert before) and 'content'.
-5. For "replace": provide 'start_line', 'end_line' (1-indexed, inclusive range) and 'content'.
-6. When editing, do not include the line number and tab character code prefixed by the read_file tool.
-7. If you need to know the current state of a file, call read_file.
-8. Always provide a short concise sentence explaining the intent of your next action, e.g. "Creating project file structure.", "Reading files required to understand the issue.", ...
-9. Always return concise, useful feedback on changes made.`;
+1. If you want to edit a file, call read_file first. The output includes line numbers for use with edit_file.
+2. When using the edit_file tool, use the line numbers provided by the last read_file call on that file.
+3. Do not compensate for line-drift of consecutive edits, the edit_file tool already accounts for it: line numbers remain stable across edits until you explicitly call read_file again.
+4. You may perform multiple edits on a file without calling read_file inbetween but do not edit the same range of lines in a file twice (messes up tool line drift computation). Call read_file first if you need to edit already edited lines.
+5. Always provide a short concise sentence explaining the intent of your next set of tool calls, e.g. "Creating project file structure.", "Reading files required to understand the issue.", ...
+6. You must use the todo tool before implementing non-trivial changes. Provide an overview or a brief list of required steps to complete the implementation. Don't reason too much about this being perfectly complete/correct. You can always deviate from your original plan as the need arises.
+6. Always return concise, useful feedback on changes made.`;
 
 // Token usage tracking
 let totalPromptTokens = 0;
@@ -31,6 +26,34 @@ let lastMessageType = null;
 
 // Instantiate Tool
 const tool = new Tool();
+
+async function loadContext() {
+    try {
+        const data = await fs.readFile(CONTEXT_FILE, 'utf-8');
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) {
+            console.log(`📂 Loaded context (${parsed.length} messages)`);
+            return parsed;
+        }
+    } catch (err) {
+        // File doesn't exist or invalid JSON, start fresh
+        if (err.code !== 'ENOENT') {
+            console.log(`⚠️  Warning: Could not load context: ${err.message}`);
+        }
+    }
+    return [];
+}
+
+async function saveContext(messages) {
+    try {
+        // Save only user/assistant/tool messages (skip system prompt)
+        const toSave = messages.filter(m => m.role !== 'system');
+        await fs.writeFile(CONTEXT_FILE, JSON.stringify(toSave, null, 2), 'utf-8');
+        console.log(`💾 Saved context (${toSave.length} messages)`);
+    } catch (err) {
+        console.log(`⚠️  Warning: Could not save context: ${err.message}`);
+    }
+}
 
 async function fetchCompletion(messages) {
     const res = await fetch(`${LM_STUDIO_URL}/v1/chat/completions`, {
@@ -73,14 +96,51 @@ function displayMessage(role, content) {
 }
 
 async function main() {
-    const messages = [{ role: 'system', content: SYSTEM_PROMPT }];
+    // Load previous context if it exists
+    const previousMessages = await loadContext();
+    const messages = [{ role: 'system', content: SYSTEM_PROMPT }, ...previousMessages];
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
     console.log('🚀 LLM Coding Harness started. Type "exit" to quit.\n');
 
     while (true) {
         const userPrompt = await new Promise(resolve => rl.question('> ', resolve));
-        if (userPrompt.trim().toLowerCase() === 'exit') break;
+        console.log("");
+
+        if (userPrompt.slice(0, 1) === '/') {
+            const matches = userPrompt.match(/^\/(?<cmd>[a-zA-Z]+)(?:\s+(?<args>.*))?$/);
+            const cmd = matches?.groups?.cmd ?? null;
+            const args = matches?.groups?.args ?? null;
+            if (!cmd) {
+                console.log(`\nInvalid command syntax\n`);
+            } else if (cmd === 'exit') {
+                await saveContext(messages);
+                break;
+            } else if (cmd === 'models') {
+                try {
+                    const res = await fetch(`${LM_STUDIO_URL}/v1/models`);
+                    if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
+                    const data = await res.json();
+                    const models = data.data?.map(m => m.id) || [];
+                    console.log(`\n📋 Available Models:\n${models.map(m => `  - ${m}`).join('\n')}\n`);
+                } catch (err) {
+                    console.log(`\n❌ Failed to fetch models: ${err.message}\n`);
+                }
+            } else if (cmd === 'tool') {
+                const [toolName, ...rest] = args.split(' ');
+                const jsonStr = rest.join(' ');
+                try {
+                    const args = JSON.parse(jsonStr);
+                    const result = await tool.executeTool(toolName, args);
+                    console.log(`\n🔧 ${toolName} output:\n${result}\n`);
+                } catch (err) {
+                    console.log(`\n❌ Failed to execute tool "${toolName}": ${err.message}\n`);
+                }
+            } else {
+                console.log('Unrecognized command');
+            }
+            continue;
+        }
 
         messages.push({ role: 'user', content: userPrompt });
 
@@ -121,7 +181,7 @@ async function main() {
                         const args = JSON.parse(tc.function.arguments);
                         // Display tool name and abbreviated arguments (limit each property to 10 chars)
                         const abbreviatedArgs = Object.fromEntries(
-                            Object.entries(args).map(([k, v]) => [k, String(v).length > 10 ? String(v).slice(0, 10) + '...' : String(v)])
+                            Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 10 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
                         );
                         displayMessage('tool', `${tc.function.name}, Args: ${JSON.stringify(abbreviatedArgs)}`);
                         const result = await tool.executeTool(tc.function.name, args);

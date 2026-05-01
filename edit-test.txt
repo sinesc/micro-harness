@@ -5,8 +5,3 @@ four hidden problems
 five downstream errors
 six unresponsive endpoints
 seven broken apps
-eight is all
-9
-10
-11
-12
