@@ -24,6 +24,8 @@ export class Tool {
         this.fileChecksums = new Map();
         // Files that have been successfully edited since the last read_file call
         this.filesDirtyAfterRead = new Set();
+        // Pending previews awaiting apply_preview: Map<id, pendingEdit>
+        this.pendingPreviews = new Map();
     }
 
     static TOOLS = [
@@ -83,9 +85,24 @@ export class Tool {
                             description: 'End of the replacement range (1-indexed). Unless this is the last line of the file, the last line of replacement must exactly match its current content.',
                             oneOf: [{ type: 'integer' }, { type: 'string' }]
                         },
-                        replacement: { type: 'string', description: 'New content for the range. Must begin with the exact text of start_line (leading anchor) and end with the exact text of end_line (trailing anchor), unless those lines are at the file boundary.' }
+                        replacement: { type: 'string', description: 'New content for the range. Must begin with the exact text of start_line (leading anchor) and end with the exact text of end_line (trailing anchor), unless those lines are at the file boundary.' },
+                        preview: { type: 'boolean', description: 'If true, return a preview of the edit without applying it. Returns a preview ID that can be passed to apply_preview to apply the edit.' }
                     },
                     required: ['path', 'start_line', 'end_line', 'replacement']
+                }
+            }
+        },
+        {
+            type: 'function',
+            function: {
+                name: 'apply_preview',
+                description: 'Apply a pending edit that was previously previewed by edit_file. Use the 8-character ID returned in the preview.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        id: { type: 'string', description: '8-character preview ID returned by edit_file' }
+                    },
+                    required: ['id']
                 }
             }
         },
@@ -122,7 +139,7 @@ export class Tool {
             type: 'function',
             function: {
                 name: 'syntax_check',
-                description: 'Check JavaScript syntax for a file using `node -c`. Returns success or error message.',
+                description: 'Check JavaScript syntax. Returns success or error message.',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -274,7 +291,7 @@ export class Tool {
         return `${output}\n\n---\nTotal: ${total} match(es) found.`;
     }
 
-    async edit_file({ path: filePath, start_line, end_line, replacement }) {
+    async edit_file({ path: filePath, start_line, end_line, replacement, preview = false }) {
         // --- Parameter validation ---
         if (start_line === undefined || start_line === null)
             throw new ToolError(`You must specify a 'start_line' for the edit.`);
@@ -311,27 +328,22 @@ export class Tool {
         if (previousChecksum && previousChecksum !== currentChecksum)
             throw new ToolError(`File '${filePath}' has been modified externally since it was last read. Please call read_file first to refresh the file contents, then retry the edit.`);
 
-        // True when the model has successfully edited this file since the last read_file call,
-        // meaning re-reading will give fresher line numbers and content.
         const dirty = this.filesDirtyAfterRead.has(filePath);
-
         const offsetMap = this.#getFileOffsetMap(filePath);
         const lines = fileContent.split(/\r?\n/);
 
-        const rereadOrFix = dirty ? 'Re-read the file to get current line numbers.' : 'Check that your line numbers are correct.';
-
         const actualStart = startLine + this.#getOffset(offsetMap, startLine);
         if (actualStart < 1 || actualStart > lines.length)
-            throw new ToolError(`'start_line' ${startLine} resolves to line ${actualStart}, which is out of bounds (file has ${lines.length} line${lines.length !== 1 ? 's' : ''}). ${rereadOrFix}`);
+            throw new ToolError(`start_line is out of bounds after considering previous edits. Re-read the file.`);
         let startIdx = actualStart - 1;
 
         const actualEnd = endLine + this.#getOffset(offsetMap, endLine);
         if (actualEnd < 1 || actualEnd > lines.length)
-            throw new ToolError(`'end_line' ${endLine} resolves to line ${actualEnd}, which is out of bounds (file has ${lines.length} line${lines.length !== 1 ? 's' : ''}). ${rereadOrFix}`);
+            throw new ToolError(`end_line is out of bounds after considering previous edits. Re-read the file.`);
         let endIdx = actualEnd - 1;
 
         if (endIdx < startIdx)
-            throw new ToolError(`Resolved range is invalid — 'end_line' ${endLine} (actual line ${actualEnd}) is before 'start_line' ${startLine} (actual line ${actualStart}).`);
+            throw new ToolError(`Range is invalid after considering previous edits. Re-read the file.`);
 
         // Strip one trailing newline before splitting so that a line-terminated
         // replacement ("foo\n") is treated as one line, not two.
@@ -341,12 +353,13 @@ export class Tool {
         // file at start_line/end_line to prevent silently dropping content.
         // Anchors are waived at file boundaries.  Resolution priority per anchor:
         //   1. exact at expected position  2. trim at expected position
-        //   3. exact fuzzy ±3 lines        4. trim fuzzy ±3 lines
+        //   3. exact fuzzy ±5 lines        4. trim fuzzy ±5 lines
         const FUZZY_RADIUS = 5;
-        let startDelta = 0;
         let endDelta = 0;
         let startTrimFixed = false;
         let endTrimFixed = false;
+        let startError = null;
+        let endError = null;
 
         if (startIdx !== 0) {
             if (newLines.length === 0)
@@ -355,8 +368,12 @@ export class Tool {
                     `The first line of 'replacement' must exactly match line ${actualStart} as a leading anchor:\n` +
                     `  "${lines[startIdx]}"`
                 );
-            ({ idx: startIdx, delta: startDelta, trimFixed: startTrimFixed } =
-                this.#resolveAnchor(lines, newLines[0], startIdx, FUZZY_RADIUS, 'Leading', dirty));
+            try {
+                ({ idx: startIdx, trimFixed: startTrimFixed } =
+                    this.#resolveAnchor(lines, newLines[0], startIdx, FUZZY_RADIUS, 'Leading', dirty));
+            } catch (e) {
+                startError = e;
+            }
         }
 
         if (endIdx !== lines.length - 1) {
@@ -366,8 +383,29 @@ export class Tool {
                     `The last line of 'replacement' must exactly match line ${actualEnd} as a trailing anchor:\n` +
                     `  "${lines[endIdx]}"`
                 );
-            ({ idx: endIdx, delta: endDelta, trimFixed: endTrimFixed } =
-                this.#resolveAnchor(lines, newLines[newLines.length - 1], endIdx, FUZZY_RADIUS, 'Trailing', dirty));
+            try {
+                ({ idx: endIdx, delta: endDelta, trimFixed: endTrimFixed } =
+                    this.#resolveAnchor(lines, newLines[newLines.length - 1], endIdx, FUZZY_RADIUS, 'Trailing', dirty));
+            } catch (e) {
+                endError = e;
+            }
+        }
+
+        // Both anchors failed — nothing to go on
+        if (startError && endError) throw startError;
+
+        // One anchor failed or preview requested — generate a preview rather than applying
+        if (startError || endError || preview) {
+            const newLinesForApply = [...newLines];
+            if (startTrimFixed) newLinesForApply[0] = lines[startIdx];
+            if (endTrimFixed) newLinesForApply[newLinesForApply.length - 1] = lines[endIdx];
+            const reason = (startError || endError)
+                ? 'One anchor matched but the other did not — showing a preview instead of applying.'
+                : null;
+            return this.#generatePreviewResponse(
+                filePath, fileContent, currentChecksum, lines, offsetMap,
+                startIdx, endIdx, newLinesForApply, startLine, endLine + endDelta, reason
+            );
         }
 
         // Restore correct whitespace in any trim-matched anchor lines so the file
@@ -377,7 +415,7 @@ export class Tool {
 
         // Re-validate range after fuzzy corrections
         if (endIdx < startIdx)
-            throw new ToolError(`After anchor correction, the edit range is invalid — corrected start (line ${startIdx + 1}) is after corrected end (line ${endIdx + 1}).`);
+            throw new ToolError(`Range is invalid after considering previous edits. Re-read the file.`);
 
         this.editHistory.push({ path: filePath, content: fileContent, offsetMap: new Map(offsetMap) });
 
@@ -387,21 +425,47 @@ export class Tool {
         await fs.writeFile(filePath, newContent, 'utf-8');
         this.fileChecksums.set(filePath, this.#computeChecksum(newContent));
         this.filesDirtyAfterRead.add(filePath);
+        return 'Edit successful.';
+    }
 
-        if (startDelta !== 0 || endDelta !== 0 || startTrimFixed || endTrimFixed) {
-            const notes = [];
-            if (startDelta !== 0) notes.push(`start_line shifted by ${startDelta > 0 ? '+' : ''}${startDelta}`);
-            if (endDelta !== 0) notes.push(`end_line shifted by ${endDelta > 0 ? '+' : ''}${endDelta}`);
-            if (startTrimFixed) notes.push('leading anchor matched after ignoring whitespace (corrected in output)');
-            if (endTrimFixed) notes.push('trailing anchor matched after ignoring whitespace (corrected in output)');
-            const rereadHint = startDelta !== 0 ? ' Re-read the file before making further edits near the start of the corrected range.' : '';
-            return `Edit successful.`; // Note: ${notes.join('; ')}.${rereadHint}`;
-        }
+    async apply_preview({ id }) {
+        const pending = this.pendingPreviews.get(id);
+        if (!pending)
+            throw new ToolError(`No pending preview with id '${id}'. It may have already been applied or the id is incorrect.`);
+
+        const { filePath, fileContent, checksum, offsetMapSnapshot, startIdx, endIdx, newLines, startLine, logicalEndLine } = pending;
+
+        const currentContent = await fs.readFile(filePath, 'utf-8');
+        if (this.#computeChecksum(currentContent) !== checksum)
+            throw new ToolError(`File '${filePath}' has changed since this preview was generated. Re-read the file and retry the edit.`);
+
+        const lines = currentContent.split(/\r?\n/);
+
+        this.fileOffsetMaps.set(filePath, new Map(offsetMapSnapshot));
+        const liveOffsetMap = this.fileOffsetMaps.get(filePath);
+
+        this.editHistory.push({ path: filePath, content: fileContent, offsetMap: new Map(offsetMapSnapshot) });
+        this.#editSplice(liveOffsetMap, lines, startIdx, endIdx - startIdx + 1, newLines, startLine, logicalEndLine);
+
+        const newContent = lines.join('\n');
+        await fs.writeFile(filePath, newContent, 'utf-8');
+        this.fileChecksums.set(filePath, this.#computeChecksum(newContent));
+        this.filesDirtyAfterRead.add(filePath);
+        this.pendingPreviews.delete(id);
         return 'Edit successful.';
     }
 
     async syntax_check({ path: filePath }) {
-        const { stdout, stderr } = await execAsync(`node -c "${filePath}"`);
+        let stderr;
+        try {
+            let result = await execAsync(`acorn --module --ecma2024 --silent "${filePath}"`);
+            stderr = result.stderr;
+        } catch (e) {
+            if (e.stderr === undefined) {
+                throw new Error('Failed to run external syntax check command');
+            }
+            stderr = e.stderr;
+        }
         if (stderr) {
             throw new ToolError(stderr.trim());
         }
@@ -447,6 +511,60 @@ export class Tool {
         return offset;
     }
 
+    #generatePreviewResponse(filePath, fileContent, checksum, lines, offsetMap, startIdx, endIdx, newLines, startLine, logicalEndLine, reason) {
+        const id = crypto.randomUUID().split('-')[0];
+
+        this.pendingPreviews.set(id, {
+            filePath, fileContent, checksum,
+            offsetMapSnapshot: new Map(offsetMap),
+            startIdx, endIdx, newLines, startLine, logicalEndLine,
+        });
+
+        const CONTEXT = 3;
+        const MAX_CHANGED = 10;
+        const half = Math.floor(MAX_CHANGED / 2);
+
+        const output = [];
+        if (reason) output.push(reason + '\n');
+        output.push(`Preview [${id}]:\n`);
+
+        // Context before
+        for (let i = Math.max(0, startIdx - CONTEXT); i < startIdx; i++)
+            output.push(`  ${i + 1} │ ${lines[i]}`);
+
+        // Removed lines (old content)
+        const removedCount = endIdx - startIdx + 1;
+        if (removedCount <= MAX_CHANGED) {
+            for (let i = startIdx; i <= endIdx; i++)
+                output.push(`- ${i + 1} │ ${lines[i]}`);
+        } else {
+            for (let i = startIdx; i < startIdx + half; i++)
+                output.push(`- ${i + 1} │ ${lines[i]}`);
+            output.push(`- ... (${removedCount - MAX_CHANGED} more lines)`);
+            for (let i = endIdx - half + 1; i <= endIdx; i++)
+                output.push(`- ${i + 1} │ ${lines[i]}`);
+        }
+
+        // Added lines (new content)
+        if (newLines.length <= MAX_CHANGED) {
+            for (const l of newLines)
+                output.push(`+    │ ${l}`);
+        } else {
+            for (let i = 0; i < half; i++)
+                output.push(`+    │ ${newLines[i]}`);
+            output.push(`+ ... (${newLines.length - MAX_CHANGED} more lines)`);
+            for (let i = newLines.length - half; i < newLines.length; i++)
+                output.push(`+    │ ${newLines[i]}`);
+        }
+
+        // Context after
+        for (let i = endIdx + 1; i <= Math.min(lines.length - 1, endIdx + CONTEXT); i++)
+            output.push(`  ${i + 1} │ ${lines[i]}`);
+
+        output.push(`\nCall apply_preview {"id":"${id}"} to apply.`);
+        return output.join('\n');
+    }
+
     // Resolves one anchor (leading or trailing) against the file's lines.
     // Priority: exact at position → trim at position → exact fuzzy → trim fuzzy.
     // Returns { idx, delta, trimFixed } or throws ToolError.
@@ -488,7 +606,7 @@ export class Tool {
 
         const rereadOrFix = dirty
             ? 'Re-read the file to get the current content and line numbers.'
-            : 'Fix the anchor to match the file line shown above. If your intention is to change one of the anchor lines you must decrease start_line and increase end_line so that the line you want to change is no longer an anchor line.';
+            : 'Fix the anchor to match the file line shown above, or re-read the file.';
         throw new ToolError(
             `${label} anchor mismatch — the provided line does not match line ${idealIdx + 1} of the file and was not found within ±${radius} lines.\n` +
             `  Provided:  "${anchorText}"\n` +
@@ -542,6 +660,7 @@ export class Tool {
                 case 'read_file': return await this.read_file(args);
                 case 'create_file': return await this.create_file(args);
                 case 'edit_file': return await this.edit_file(args);
+                case 'apply_preview': return await this.apply_preview(args);
                 case 'undo': return await this.undo();
                 case 'search_files': return await this.search_files(args);
                 case 'syntax_check': return await this.syntax_check(args);
@@ -553,7 +672,7 @@ export class Tool {
             if (err instanceof ToolError) {
                 const call = JSON.stringify({ name, args });
                 if (call === this.lastErrorCall) {
-                    return "Stop making identical tool calls. Read the previous error message carefully, analyse the problem and make a correct tool call.";
+                    return "Identical tool call detected. Read the previous error message carefully, analyse the problem and make a correct tool call.";
                 }
                 this.lastErrorCall = call;
                 return err.message;
