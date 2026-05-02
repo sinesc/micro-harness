@@ -287,6 +287,12 @@ async function main() {
 
     console.log('🚀 LLM Coding Harness started. Type "/exit" to quit.\n');
 
+	process.on('SIGINT', async () => {
+		await saveContext(messages);
+		rl.close();
+		process.exit(0);
+	});
+
     while (true) {
         const userPrompt = await new Promise(resolve => rl.question('> ', resolve));
         console.log("");

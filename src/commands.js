@@ -18,14 +18,14 @@ export class Command {
     }
 
     async help() {
-        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/liveprune - Toggle live pruning of stale context (currently ${this.livepruneEnabled ? 'ON' : 'OFF'})`;
+        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/liveprune - Toggle live pruning of stale context (currently ${this.livepruneEnabled ? 'ON' : 'OFF'})\n/reset - Clear current context (keeping only system prompt)`;
     }
 
     toggleLiveprune() {
         this._livepruneRef.value = !this._livepruneRef.value;
         return `Live pruning is now ${this._livepruneRef.value ? 'ON' : 'OFF'}.`;
     }
-    
+
     async exit(messages) {
         await this._saveContext(messages);
     }
@@ -149,6 +149,15 @@ export class Command {
         return output;
     }
 
+    async reset(messages) {
+        // Keep only the system prompt (first message)
+        while (messages.length > 1) {
+            messages.pop();
+        }
+        await this._saveContext(messages);
+        return '✅ Context cleared.';
+    }
+
     async execute(cmd, args, messages, LM_STUDIO_URL, currentModel) {
         switch (cmd) {
             case 'exit':
@@ -176,6 +185,8 @@ export class Command {
                 return this.toggleLiveprune();
             case 'context':
                 return await this.context(messages);
+            case 'reset':
+                return await this.reset(messages);
             default:
                 throw new CommandError(`Unrecognized command: /${cmd}`);
         }
