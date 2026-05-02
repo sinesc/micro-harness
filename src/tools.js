@@ -27,8 +27,6 @@ export class Tool {
         this.filesDirtyAfterRead = new Set();
         // Pending previews awaiting apply_preview: Map<id, pendingEdit>
         this.pendingPreviews = new Map();
-        // Stale results for read_stale tool
-        this.staleResults = new Map();
     }
 
     static TOOLS = [
@@ -511,7 +509,7 @@ export class Tool {
         return text;
     }
 
-    read_stale({ content_id }) {
+    read_stale({ content_id }, messages) {
         if (content_id === undefined || content_id === null) {
             throw new ToolError('content_id is required.');
         }
@@ -522,10 +520,10 @@ export class Tool {
         if (id < 0) {
             throw new ToolError(`content_id must be >= 0, got ${id}.`);
         }
-        if (!this.staleResults || !this.staleResults.has(id)) {
+        if (!messages || !messages[id]) {
             throw new ToolError(`No stale result found at index ${id}.`);
         }
-        return this.staleResults.get(id);
+        return messages[id].content;
     }
 
     // --- Helper functions ---
@@ -724,7 +722,7 @@ export class Tool {
 
     // --- executeTool ---
 
-    async executeTool(name, args) {
+    async executeTool(name, args, messages) {
         const dump = (v) => { console.log(v); return v; };
         try {
             switch (name) {
@@ -738,7 +736,7 @@ export class Tool {
                 case 'syntax_check': return { result: await this.syntax_check(args), error: null, toolName: name };
                 case 'calc': return { result: this.calc(args), error: null, toolName: name };
                 case 'todo': return { result: this.todo(args), error: null, toolName: name };
-                case 'read_stale': return { result: this.read_stale(args), error: null, toolName: name };
+                case 'read_stale': return { result: this.read_stale(args, messages), error: null, toolName: name };
                 default: return { result: `Unknown tool: ${name}`, error: null, toolName: name };
             }
         } catch (err) {

@@ -1,7 +1,0 @@
-one simple tool
-two big bugs
-three bad fixes
-four hidden problems
-five downstream errors
-six unresponsive endpoints
-seven broken apps

@@ -54,12 +54,21 @@ function pruneContextForAPI(messages) {
         return messages.filter(m => m.role !== 'system');
     }
 
+    // Find the index of the last user message
+    let lastUserIndex = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+            lastUserIndex = i;
+            break;
+        }
+    }
+
     const lastReadFileIndexByPath = new Map();
     const filesReReadAfterPreview = new Set();
     let lastAssistantWithTools = null;
 
     // First pass: gather metadata (O(N))
-    for (let i = 0; i < messages.length; i++) {
+    for (let i = 0; i <= lastUserIndex; i++) {
         const msg = messages[i];
 
         if (msg.role === 'assistant' && msg.tool_calls) {
@@ -88,11 +97,9 @@ function pruneContextForAPI(messages) {
 
     // Second pass: filter and build pruned list (O(N))
     const pruned = [];
-    const staleResults = new Map();
-    let staleCounter = 0;
     lastAssistantWithTools = null;
 
-    for (let i = 0; i < messages.length; i++) {
+    for (let i = 0; i <= lastUserIndex; i++) {
         const msg = messages[i];
 
         if (msg.role === 'assistant' && msg.tool_calls) {
@@ -119,10 +126,7 @@ function pruneContextForAPI(messages) {
                 if (filePath && lastReadFileIndexByPath.has(filePath)) {
                     const lastIndex = lastReadFileIndexByPath.get(filePath);
                     if (lastIndex !== i) {
-                        const placeholder = `Stale result excluded from context, should you need this result use tool read_stale with content_id=${staleCounter}`;
-                        staleResults.set(staleCounter, msg.content);
-                        tool.staleResults.set(staleCounter, msg.content);
-                        staleCounter++;
+                        const placeholder = `Stale result excluded from context, should you need this result use tool read_stale with content_id=${i}`;
                         pruned.push({ ...msg, content: placeholder });
                         continue;
                     }
@@ -159,6 +163,11 @@ function pruneContextForAPI(messages) {
         if (msg.role !== 'system') {
             pruned.push(msg);
         }
+    }
+
+    // Append current turn messages unchanged
+    for (let i = lastUserIndex + 1; i < messages.length; i++) {
+        pruned.push(messages[i]);
     }
 
     // Third pass: remove failed tool results succeeded by later calls (O(N) backwards)
@@ -294,9 +303,9 @@ async function main() {
                     if (result === 'exit') {
                         break;
                     }
-                    console.log(`\n${result}\n`);
+                    console.log(`${result}\n`);
                 } catch (err) {
-                    console.log(`\n❌ ${err.message}\n`);
+                    console.log(`❌ ${err.message}\n`);
                 }
             }
             continue;
@@ -344,7 +353,7 @@ async function main() {
                         const abbreviatedArgs = Object.fromEntries(
                             Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 16 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
                         );
-                        const structuredResult = await tool.executeTool(tc.function.name, args);
+                        const structuredResult = await tool.executeTool(tc.function.name, args, messages);
                         const isFailed = structuredResult.error !== undefined && structuredResult.error !== null;
                         displayMessage('tool', `${tc.function.name}${JSON.stringify(abbreviatedArgs)}`, isFailed ? 'red' : 'grey');
                         messages.push({ role: 'assistant', content: null, tool_calls: [tc] });
