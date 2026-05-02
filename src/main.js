@@ -2,6 +2,7 @@
 import readline from 'readline';
 import fs from 'fs/promises';
 import { Tool } from './tools.js';
+import { Command } from './commands.js';
 
 const LM_STUDIO_URL = 'http://10.13.37.110:1234';
 const CONTEXT_WINDOW = 131072; // Default context window size
@@ -40,6 +41,8 @@ let lastMessageType = null;
 
 // Instantiate Tool
 const tool = new Tool();
+// Instantiate Command
+const command = new Command({ tool, saveContext });
 
 async function loadContext() {
     try {
@@ -126,67 +129,21 @@ async function main() {
         console.log("");
 
         if (userPrompt.slice(0, 1) === '/') {
-            const matches = userPrompt.match(/^\/(?<cmd>[a-zA-Z]+)(?:\s+(?<args>.*))?$/);
+            const matches = userPrompt.match(/^\/(?<cmd>[a-zA-Z_]+)(?:\s+(?<args>.*))?$/);
             const cmd = matches?.groups?.cmd ?? null;
             const args = matches?.groups?.args ?? null;
             if (!cmd) {
                 console.log(`\nInvalid command syntax\n`);
-            } else if (cmd === 'exit') {
-                await saveContext(messages);
-                break;
-            } else if (cmd === 'models') {
-                try {
-                    const res = await fetch(`${LM_STUDIO_URL}/v1/models`);
-                    if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
-                    const data = await res.json();
-                    const apiModels = (data.data?.map(m => m.id) || []).sort();
-                    const models = ['local-model', ...apiModels];
-                    console.log(`\n📋 Available Models (current: ${currentModel}):\n${models.map((m, i) => `  ${i}. ${m}${m === currentModel ? ' (active)' : ''}`).join('\n')}\n`);
-                } catch (err) {
-                    console.log(`\n❌ Failed to fetch models: ${err.message}\n`);
-                }
-            } else if (cmd === 'model') {
-                if (!args) {
-                    console.log(`\nCurrent model: ${currentModel}\n`);
-                    continue;
-                }
-                try {
-                    const res = await fetch(`${LM_STUDIO_URL}/v1/models`);
-                    if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
-                    const data = await res.json();
-                    const apiModels = (data.data?.map(m => m.id) || []).sort();
-                    const models = ['local-model', ...apiModels];
-
-                    // Check if args is a valid index
-                    const index = parseInt(args, 10);
-                    let selectedModel = null;
-                    if (!isNaN(index) && index >= 0 && index < models.length) {
-                        selectedModel = models[index];
-                    } else if (models.includes(args)) {
-                        selectedModel = args;
-                    }
-
-                    if (selectedModel) {
-                        currentModel = selectedModel;
-                        console.log(`\n✅ Switched to model: ${currentModel}\n`);
-                    } else {
-                        console.log(`\n❌ Invalid model or index. Use /models to see available options.\n`);
-                    }
-                } catch (err) {
-                    console.log(`\n❌ Failed to fetch models: ${err.message}\n`);
-                }
-            } else if (cmd === 'tool') {
-                const [toolName, ...rest] = args.split(' ');
-                const jsonStr = rest.join(' ');
-                try {
-                    const args = JSON.parse(jsonStr);
-                    const result = await tool.executeTool(toolName, args);
-                    console.log(`\n🔧 ${toolName} output:\n${result}\n`);
-                } catch (err) {
-                    console.log(`\n❌ Failed to execute tool "${toolName}": ${err.message}\n`);
-                }
             } else {
-                console.log('Unrecognized command');
+                try {
+                    const result = await command.execute(cmd, args, messages, LM_STUDIO_URL, currentModel);
+                    if (result === 'exit') {
+                        break;
+                    }
+                    console.log(`\n${result}\n`);
+                } catch (err) {
+                    console.log(`\n❌ ${err.message}\n`);
+                }
             }
             continue;
         }
