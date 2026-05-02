@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import path from 'path';
 import crypto from 'crypto';
 import { exec } from 'child_process';
 import util from 'util';
@@ -180,8 +181,9 @@ export class Tool {
     ];
 
     async list_files({ dir }) {
+        const resolvedDir = this._resolvePath(dir);
         try {
-            const entries = await fs.readdir(dir, { withFileTypes: true });
+            const entries = await fs.readdir(resolvedDir, { withFileTypes: true });
             return entries.map(e => `${e.isDirectory() ? '📁 ' : '📄 '}${e.name}`).join('\n');
         } catch (err) {
             throw new ToolError(`Cannot list directory '${dir}': ${err.message}`);
@@ -189,14 +191,15 @@ export class Tool {
     }
 
     async read_file({ path: filePath }) {
+        const resolvedPath = this._resolvePath(filePath);
         try {
-            const content = await fs.readFile(filePath, 'utf-8');
+            const content = await fs.readFile(resolvedPath, 'utf-8');
             // Reset offsets for this file since we re-read it
-            if (this.fileOffsetMaps.has(filePath)) {
-                this.fileOffsetMaps.delete(filePath);
+            if (this.fileOffsetMaps.has(resolvedPath)) {
+                this.fileOffsetMaps.delete(resolvedPath);
             }
-            this.fileChecksums.set(filePath, this.#computeChecksum(content));
-            this.filesDirtyAfterRead.delete(filePath);
+            this.fileChecksums.set(resolvedPath, this.#computeChecksum(content));
+            this.filesDirtyAfterRead.delete(resolvedPath);
             let line = 1;
             return content.split(/\r?\n/).map((text, index) => `${index+1}\t${text}`).join("\n");
         } catch (err) {
@@ -205,10 +208,11 @@ export class Tool {
     }
 
     async create_file({ path: filePath, content }) {
+        const resolvedPath = this._resolvePath(filePath);
         try {
-            await fs.writeFile(filePath, content, 'utf-8');
-            this.fileChecksums.set(filePath, this.#computeChecksum(content));  // Set initial checksum
-            return `Created file ${filePath} with ${content.split(/\r?\n/).length} line(s).`;
+            await fs.writeFile(resolvedPath, content, 'utf-8');
+            this.fileChecksums.set(resolvedPath, this.#computeChecksum(content));  // Set initial checksum
+            return `Created file ${resolvedPath} with ${content.split(/\r?\n/).length} line(s).`;
         } catch (err) {
             throw new ToolError(`Cannot create file '${filePath}': ${err.message}`);
         }
@@ -237,6 +241,7 @@ export class Tool {
     }
 
     async search_files({ pattern, dir = '.', file_pattern = null, max_results = 50 }) {
+        const resolvedDir = this._resolvePath(dir);
         const results = [];
         const regex = new RegExp(pattern, 'i'); // case-insensitive by default
 
@@ -306,6 +311,8 @@ export class Tool {
         if (typeof replacement !== 'string')
             throw new ToolError(`'replacement' must be a string.`);
 
+        const resolvedPath = this._resolvePath(filePath);
+
         const startLine = parseInt(start_line, 10);
         const endLine = parseInt(end_line, 10);
 
@@ -321,15 +328,15 @@ export class Tool {
             throw new ToolError(`'start_line' (${startLine}) must not exceed 'end_line' (${endLine}).`);
 
         // --- File read and checksum ---
-        const fileContent = await fs.readFile(filePath, 'utf-8');
+        const fileContent = await fs.readFile(resolvedPath, 'utf-8');
 
-        const previousChecksum = this.fileChecksums.get(filePath);
+        const previousChecksum = this.fileChecksums.get(resolvedPath);
         const currentChecksum = this.#computeChecksum(fileContent);
         if (previousChecksum && previousChecksum !== currentChecksum)
             throw new ToolError(`File '${filePath}' has been modified externally since it was last read. Please call read_file first to refresh the file contents, then retry the edit.`);
 
-        const dirty = this.filesDirtyAfterRead.has(filePath);
-        const offsetMap = this.#getFileOffsetMap(filePath);
+        const dirty = this.filesDirtyAfterRead.has(resolvedPath);
+        const offsetMap = this.#getFileOffsetMap(resolvedPath);
         const lines = fileContent.split(/\r?\n/);
 
         const actualStart = startLine + this.#getOffset(offsetMap, startLine);
@@ -417,14 +424,14 @@ export class Tool {
         if (endIdx < startIdx)
             throw new ToolError(`Range is invalid after considering previous edits. Re-read the file.`);
 
-        this.editHistory.push({ path: filePath, content: fileContent, offsetMap: new Map(offsetMap) });
+        this.editHistory.push({ path: resolvedPath, content: fileContent, offsetMap: new Map(offsetMap) });
 
         this.#editSplice(offsetMap, lines, startIdx, endIdx - startIdx + 1, newLines, startLine, endLine + endDelta);
 
         const newContent = lines.join('\n');
-        await fs.writeFile(filePath, newContent, 'utf-8');
-        this.fileChecksums.set(filePath, this.#computeChecksum(newContent));
-        this.filesDirtyAfterRead.add(filePath);
+        await fs.writeFile(resolvedPath, newContent, 'utf-8');
+        this.fileChecksums.set(resolvedPath, this.#computeChecksum(newContent));
+        this.filesDirtyAfterRead.add(resolvedPath);
         return 'Edit successful.';
     }
 
@@ -456,9 +463,10 @@ export class Tool {
     }
 
     async syntax_check({ path: filePath }) {
+        const resolvedPath = this._resolvePath(filePath);
         let stderr;
         try {
-            let result = await execAsync(`acorn --module --ecma2024 --silent "${filePath}"`);
+            let result = await execAsync(`acorn --module --ecma2024 --silent "${resolvedPath}"`);
             stderr = result.stderr;
         } catch (e) {
             if (e.stderr === undefined) {
@@ -469,7 +477,7 @@ export class Tool {
         if (stderr) {
             throw new ToolError(stderr.trim());
         }
-        return `Syntax check passed for ${filePath}.`;
+        return `Syntax check passed for ${resolvedPath}.`;
     }
 
     calc({ expression }) {
@@ -488,6 +496,37 @@ export class Tool {
     }
 
     // --- Helper functions ---
+
+    /**
+     * Resolves a relative path against the current working directory.
+     * Validates that the path is relative and resolves within the working directory.
+     * @param {string} relativePath - A relative path to resolve
+     * @returns {string} The fully resolved absolute path
+     * @throws {ToolError} If path is absolute or resolves outside the working directory
+     */
+    _resolvePath(relativePath) {
+        if (path.isAbsolute(relativePath)) {
+            throw new ToolError(
+                `Absolute paths are not allowed. Received: '${relativePath}'. ` +
+                `Please provide a relative path.`
+            );
+        }
+
+        const resolved = path.resolve(process.cwd(), relativePath);
+        const cwd = process.cwd();
+
+        // Ensure the resolved path starts with the working directory
+        // Use path.sep to handle both Unix and Windows paths correctly
+        if (!resolved.startsWith(cwd + path.sep) && resolved !== cwd) {
+            throw new ToolError(
+                `Path '${relativePath}' resolves outside the working directory. ` +
+                `Resolved path: '${resolved}'. ` +
+                `Please provide a path within the current working directory.`
+            );
+        }
+
+        return resolved;
+    }
 
     #getFileOffsetMap(filePath) {
         if (!this.fileOffsetMaps.has(filePath)) {
