@@ -243,7 +243,7 @@ function displayTokenUsage() {
     console.log(`\n📊 Token Usage: ${totalTokens} total (${totalPromptTokens} prompt + ${totalCompletionTokens} completion) | Context: ${totalPromptTokens}/${CONTEXT_WINDOW} (${remaining} remaining)\n`);
 }
 
-function displayMessage(role, content) {
+function displayMessage(role, content, color = null) {
     content = (content || '').trim();
     if (content === '') return;
 
@@ -258,10 +258,15 @@ function displayMessage(role, content) {
         tool: '🔧'
     }[role] || role;
 
+    let colorCode = '';
+    if (color === 'grey') colorCode = '\x1b[90m';
+    else if (color === 'red') colorCode = '\x1b[91m';
+    const resetCode = '\x1b[0m';
+
     if (lastMessageType !== null && lastMessageType !== role) {
         console.log('');
     }
-    console.log(`${typeLabel} ${content}`);
+    console.log(`${typeLabel} ${colorCode}${content}${resetCode}`);
     lastMessageType = role;
 }
 
@@ -339,8 +344,9 @@ async function main() {
                         const abbreviatedArgs = Object.fromEntries(
                             Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 16 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
                         );
-                        displayMessage('tool', `${tc.function.name}${JSON.stringify(abbreviatedArgs)}`);
                         const structuredResult = await tool.executeTool(tc.function.name, args);
+                        const isFailed = structuredResult.error !== undefined && structuredResult.error !== null;
+                        displayMessage('tool', `${tc.function.name}${JSON.stringify(abbreviatedArgs)}`, isFailed ? 'red' : 'grey');
                         messages.push({ role: 'assistant', content: null, tool_calls: [tc] });
                         // Store structured result error as metadata for live-pruning
                         messages.push({ role: 'tool', tool_call_id: tc.id, content: structuredResult.result, _toolError: structuredResult.error });
