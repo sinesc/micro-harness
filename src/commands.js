@@ -6,15 +6,12 @@ export class CommandError extends Error {
 }
 
 export class Command {
-    constructor({ tool, saveContext, pruneContext, livepruneRef }) {
-        this.tool = tool;
-        this._saveContext = saveContext;
-        this._pruneContext = pruneContext;
-        this._livepruneRef = livepruneRef || { value: false };
+    constructor(application) {
+        this.application = application;
     }
 
     get livepruneEnabled() {
-        return this._livepruneRef.value;
+        return this.application.livepruneRef.value;
     }
 
     async help() {
@@ -22,17 +19,17 @@ export class Command {
     }
 
     toggleLiveprune() {
-        this._livepruneRef.value = !this._livepruneRef.value;
-        return `Live pruning is now ${this._livepruneRef.value ? 'ON' : 'OFF'}.`;
+        this.application.livepruneRef.value = !this.application.livepruneRef.value;
+        return `Live pruning is now ${this.application.livepruneRef.value ? 'ON' : 'OFF'}.`;
     }
 
-    async exit(messages) {
-        await this._saveContext(messages);
+    async exit() {
+        await this.application.saveContext(this.application.messages);
     }
 
-    async models(LM_STUDIO_URL) {
+    async models() {
         try {
-            const res = await fetch(`${LM_STUDIO_URL}/v1/models`);
+            const res = await fetch(`${this.application.lmStudioUrl}/v1/models`);
             if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
             const data = await res.json();
             const apiModels = (data.data?.map(m => m.id) || []).sort();
@@ -42,12 +39,12 @@ export class Command {
         }
     }
 
-    async model(currentModel, LM_STUDIO_URL, args) {
+    async model(args) {
         if (!args) {
-            return `Current model: ${currentModel}`;
+            return `Current model: ${this.application.currentModel}`;
         }
         try {
-            const res = await fetch(`${LM_STUDIO_URL}/v1/models`);
+            const res = await fetch(`${this.application.lmStudioUrl}/v1/models`);
             if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
             const data = await res.json();
             const apiModels = (data.data?.map(m => m.id) || []).sort();
@@ -63,6 +60,7 @@ export class Command {
             }
 
             if (selectedModel) {
+                this.application.currentModel = selectedModel;
                 return `✅ Switched to model: ${selectedModel}`;
             } else {
                 throw new CommandError(`Invalid model or index. Use /models to see available options.`);
@@ -73,14 +71,15 @@ export class Command {
         }
     }
 
-    async executeTool(toolName, args) {
-        const result = await this.tool.executeTool(toolName, args);
+    async tool(toolName, args) {
+        const result = await this.application.tool.exec(toolName, args);
         return `🔧 ${toolName} output:\n${result}`;
     }
 
-    async context(messages) {
+    async context() {
+        const messages = this.application.messages;
         const fullCount = messages.length;
-        const prunedMessages = this._pruneContext(messages);
+        const prunedMessages = this.application.pruneContextForAPI(messages);
         const prunedCount = prunedMessages.length;
         const removedCount = fullCount - prunedCount;
 
@@ -149,26 +148,26 @@ export class Command {
         return output;
     }
 
-    async reset(messages) {
+    async reset() {
         // Keep only the system prompt (first message)
-        while (messages.length > 1) {
-            messages.pop();
+        while (this.application.messages.length > 1) {
+            this.application.messages.pop();
         }
-        await this._saveContext(messages);
+        await this.application.saveContext(this.application.messages);
         return '✅ Context cleared.';
     }
 
-    async execute(cmd, args, messages, LM_STUDIO_URL, currentModel) {
+    async exec(cmd, args) {
         switch (cmd) {
             case 'exit':
-                await this.exit(messages);
+                await this.exit();
                 return 'exit';
             case 'help':
                 return await this.help();
             case 'models':
-                return await this.models(LM_STUDIO_URL);
+                return await this.models();
             case 'model':
-                return await this.model(currentModel, LM_STUDIO_URL, args);
+                return await this.model(args);
             case 'tool':
                 if (!args) {
                     throw new CommandError('Tool name is required. Usage: /tool <name> <json args>');
@@ -177,16 +176,16 @@ export class Command {
                 const jsonStr = rest.join(' ');
                 try {
                     const parsedArgs = JSON.parse(jsonStr);
-                    return await this.executeTool(name, parsedArgs);
+                    return await this.tool(name, parsedArgs);
                 } catch (err) {
                     throw new CommandError(`Failed to parse tool arguments: ${err.message}`);
                 }
             case 'liveprune':
                 return this.toggleLiveprune();
             case 'context':
-                return await this.context(messages);
+                return await this.context();
             case 'reset':
-                return await this.reset(messages);
+                return await this.reset();
             default:
                 throw new CommandError(`Unrecognized command: /${cmd}`);
         }

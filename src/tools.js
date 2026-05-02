@@ -16,7 +16,8 @@ export class ToolError extends Error {
 export class Tool {
     lastErrorCall = null;
 
-    constructor() {
+    constructor(application) {
+        this.application = application;
         // Track cumulative offsets per file: Map<filePath, Map<lineNum, offset>>
         this.fileOffsetMaps = new Map();
         // File edit history for undo
@@ -140,7 +141,7 @@ export class Tool {
             type: 'function',
             function: {
                 name: 'syntax_check',
-                description: 'Check JavaScript syntax. Returns success or error message.',
+                description: 'Check JavaScript syntax using acorn. Returns success or error message. Only works for .js files.',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -154,11 +155,11 @@ export class Tool {
             type: 'function',
             function: {
                 name: 'calc',
-                description: 'Calculate a number using an expression. Supports operations + - * / %',
+                description: 'Calculate the result of a mathematical expression. Supports operations + - * / %',
                 parameters: {
                     type: 'object',
                     properties: {
-                        expression: { type: 'string', description: 'The input string to filter' }
+                        expression: { type: 'string', description: 'The mathematical expression to evaluate' }
                     },
                     required: ['expression']
                 }
@@ -509,7 +510,7 @@ export class Tool {
         return text;
     }
 
-    read_stale({ content_id }, messages) {
+    read_stale({ content_id }) {
         if (content_id === undefined || content_id === null) {
             throw new ToolError('content_id is required.');
         }
@@ -520,6 +521,7 @@ export class Tool {
         if (id < 0) {
             throw new ToolError(`content_id must be >= 0, got ${id}.`);
         }
+        const messages = this.application.messages;
         if (!messages || !messages[id]) {
             throw new ToolError(`No stale result found at index ${id}.`);
         }
@@ -720,9 +722,9 @@ export class Tool {
         );
     }
 
-    // --- executeTool ---
+    // --- router ---
 
-    async executeTool(name, args, messages) {
+    async exec(name, args) {
         const dump = (v) => { console.log(v); return v; };
         try {
             switch (name) {
@@ -736,7 +738,7 @@ export class Tool {
                 case 'syntax_check': return { result: await this.syntax_check(args), error: null, toolName: name };
                 case 'calc': return { result: this.calc(args), error: null, toolName: name };
                 case 'todo': return { result: this.todo(args), error: null, toolName: name };
-                case 'read_stale': return { result: this.read_stale(args, messages), error: null, toolName: name };
+                case 'read_stale': return { result: this.read_stale(args), error: null, toolName: name };
                 default: return { result: `Unknown tool: ${name}`, error: null, toolName: name };
             }
         } catch (err) {
