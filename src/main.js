@@ -229,7 +229,7 @@ async function main() {
                         const args = JSON.parse(tc.function.arguments);
                         // Display tool name and abbreviated arguments (limit each property to 10 chars)
                         const abbreviatedArgs = Object.fromEntries(
-                            Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 10 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
+                            Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 16 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
                         );
                         displayMessage('tool', `${tc.function.name}${JSON.stringify(abbreviatedArgs)}`);
                         const result = await tool.executeTool(tc.function.name, args);
