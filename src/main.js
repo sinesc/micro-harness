@@ -193,11 +193,7 @@ async function main() {
 
         messages.push({ role: 'user', content: userPrompt });
 
-        let iteration = 0;
-        const MAX_ITERATIONS = 25; // Safety net against infinite loops
-
-        while (iteration < MAX_ITERATIONS) {
-            iteration++;
+        while (true) {
             try {
                 const response = await fetchCompletion(messages);
 
@@ -213,7 +209,7 @@ async function main() {
                 // Catch some mistakes.
                 if (!msg.content.trim() && !msg.tool_calls?.length) {
                     if (msg.reasoning_content?.includes('<tool_call>')) {
-                    messages.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_call>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
+                        messages.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_call>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
                     } else {
                         messages.push({ role: 'system', content: 'You did not call a tool or respond to the user. Please either call a tool or respond to the user.' });
                     }
