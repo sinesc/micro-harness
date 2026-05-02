@@ -73,7 +73,7 @@ export class Tool {
             type: 'function',
             function: {
                 name: 'edit_file',
-                description: 'Replace an inclusive range of lines (start_line through end_line) with new content. To prevent accidental line removal, the replacement must include anchor lines that match the file exactly: unless start_line is the first line of the file, the first line of replacement must equal the current content of start_line; unless end_line is the last line of the file, the last line of replacement must equal the current content of end_line. Example — to insert "c" between lines 2 ("b") and 3 ("d") use start_line=2, end_line=3, replacement="b\\nc\\nd".',
+                description: 'Replace an inclusive range of lines (start_line through end_line) with new content. To prevent accidental line removal, the replacement MUST include anchor lines above and/or below your changes that match the file exactly.',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -324,8 +324,10 @@ export class Tool {
             throw new ToolError(`'start_line' must be >= 1, got ${startLine}.`);
         if (endLine < 1)
             throw new ToolError(`'end_line' must be >= 1, got ${endLine}.`);
+        if (startLine === endLine)
+            throw new ToolError(`'end_line' must always be greater than 'start_line' since the first and last line of your edit are REQUIRED to be unmodified anchor lines. If you were trying to edit a single line, include the line above and below it in your edit.`);
         if (startLine > endLine)
-            throw new ToolError(`'start_line' (${startLine}) must not exceed 'end_line' (${endLine}).`);
+            throw new ToolError(`'start_line' must not exceed 'end_line'.`);
 
         // --- File read and checksum ---
         const fileContent = await fs.readFile(resolvedPath, 'utf-8');
@@ -407,7 +409,7 @@ export class Tool {
             if (startTrimFixed) newLinesForApply[0] = lines[startIdx];
             if (endTrimFixed) newLinesForApply[newLinesForApply.length - 1] = lines[endIdx];
             const reason = (startError || endError)
-                ? 'One anchor matched but the other did not — showing a preview instead of applying.'
+                ? 'One anchor matched but the other did not — check this preview carefully for unintentionally duplicated/removed lines.'
                 : null;
             return this.#generatePreviewResponse(
                 filePath, fileContent, currentChecksum, lines, offsetMap,
