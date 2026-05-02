@@ -82,17 +82,21 @@ function displayMessage(role, content) {
     content = (content || '').trim();
     if (content === '') return;
 
+    // Basic markdown rendering: **bold** and *italic* // TODO look into util.styleText()
+    content = content.replace(/\*\*(.*?)\*\*/g, '\x1b[1m$1\x1b[22m'); // bold
+    content = content.replace(/\*(.*?)\*/g, '\x1b[3m$1\x1b[23m'); // italic
+
     const typeLabel = {
-        system: '🤖 System',
-        user: '👤 User',
-        assistant: '🤖 Assistant',
-        tool: '🔧 Tool'
+        system: '🤖',
+        user: '👤',
+        assistant: '🤖',
+        tool: '🔧'
     }[role] || role;
 
     if (lastMessageType !== null && lastMessageType !== role) {
         console.log('');
     }
-    console.log(`${typeLabel}: ${content}`);
+    console.log(`${typeLabel} ${content}`);
     lastMessageType = role;
 }
 
