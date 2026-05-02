@@ -42,8 +42,156 @@ let lastMessageType = null;
 
 // Instantiate Tool
 const tool = new Tool();
+const livepruneRef = { value: false };
+
+/*
+ * Prune stale/useless context entries before sending to API.
+ * Returns a filtered copy of messages (excluding system prompt).
+ * Optimized to O(N) time complexity.
+ */
+function pruneContextForAPI(messages) {
+    if (!livepruneRef.value) {
+        return messages.filter(m => m.role !== 'system');
+    }
+
+    const lastReadFileIndexByPath = new Map();
+    const filesReReadAfterPreview = new Set();
+    let lastAssistantWithTools = null;
+
+    // First pass: gather metadata (O(N))
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+
+        if (msg.role === 'assistant' && msg.tool_calls) {
+            lastAssistantWithTools = msg;
+            for (const tc of msg.tool_calls) {
+                if (tc.function.name === 'read_file') {
+                    const pathArg = JSON.parse(tc.function.arguments).path;
+                    filesReReadAfterPreview.add(pathArg);
+                    lastReadFileIndexByPath.delete(pathArg);
+                }
+            }
+        }
+
+        if (msg.role === 'tool' && msg.content && !msg.content.includes('Stale result excluded')) {
+            const lines = msg.content.split('\n');
+            if (lines.length > 0 && /^\d+\t/.test(lines[0]) && lastAssistantWithTools) {
+                for (const tc of lastAssistantWithTools.tool_calls) {
+                    if (tc.function.name === 'read_file') {
+                        const pathArg = JSON.parse(tc.function.arguments).path;
+                        lastReadFileIndexByPath.set(pathArg, i);
+                    }
+                }
+            }
+        }
+    }
+
+    // Second pass: filter and build pruned list (O(N))
+    const pruned = [];
+    const staleResults = new Map();
+    let staleCounter = 0;
+    lastAssistantWithTools = null;
+
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+
+        if (msg.role === 'assistant' && msg.tool_calls) {
+            lastAssistantWithTools = msg;
+        }
+
+        if (msg.role === 'tool') {
+            if (msg.content && msg.content.includes('Stale result excluded')) {
+                pruned.push(msg);
+                continue;
+            }
+
+            const lines = msg.content?.split('\n') || [];
+            const isReadFileResult = lines.length > 0 && /^\d+\t/.test(lines[0]);
+
+            if (isReadFileResult && lastAssistantWithTools) {
+                let filePath = null;
+                for (const tc of lastAssistantWithTools.tool_calls) {
+                    if (tc.function.name === 'read_file') {
+                        filePath = JSON.parse(tc.function.arguments).path;
+                    }
+                }
+
+                if (filePath && lastReadFileIndexByPath.has(filePath)) {
+                    const lastIndex = lastReadFileIndexByPath.get(filePath);
+                    if (lastIndex !== i) {
+                        const placeholder = `Stale result excluded from context, should you need this result use tool read_stale with content_id=${staleCounter}`;
+                        staleResults.set(staleCounter, msg.content);
+                        tool.staleResults.set(staleCounter, msg.content);
+                        staleCounter++;
+                        pruned.push({ ...msg, content: placeholder });
+                        continue;
+                    }
+                }
+            }
+
+            if (msg.content && msg.content.includes('Preview [')) {
+                let filePath = null;
+                for (const tc of lastAssistantWithTools?.tool_calls || []) {
+                    if (tc.function.name === 'edit_file') {
+                        filePath = JSON.parse(tc.function.arguments).path;
+                    }
+                }
+                if (filePath && filesReReadAfterPreview.has(filePath)) {
+                    continue;
+                }
+            }
+
+            if (msg._toolError) {
+                let toolName = null;
+                for (const tc of lastAssistantWithTools?.tool_calls || []) {
+                    toolName = tc.function.name;
+                }
+                if (toolName) {
+                    msg._isFailedTool = true;
+                    msg._toolName = toolName;
+                }
+            }
+
+            pruned.push(msg);
+            continue;
+        }
+
+        if (msg.role !== 'system') {
+            pruned.push(msg);
+        }
+    }
+
+    // Third pass: remove failed tool results succeeded by later calls (O(N) backwards)
+    const finalPruned = [];
+    const succeededTools = new Set();
+
+    for (let i = pruned.length - 1; i >= 0; i--) {
+        const msg = pruned[i];
+
+        if (msg.role === 'assistant' && msg.tool_calls) {
+            finalPruned.push(msg);
+        } else if (msg.role === 'tool') {
+            if (msg._isFailedTool && succeededTools.has(msg._toolName)) {
+                continue; // Skip failed result, covered by later success
+            }
+            finalPruned.push(msg);
+            if (!msg._isFailedTool) {
+                succeededTools.add(msg._toolName);
+            }
+        } else {
+            // User or system message resets tool success tracking
+            succeededTools.clear();
+            finalPruned.push(msg);
+        }
+    }
+
+    finalPruned.reverse();
+
+    return finalPruned;
+}
+
 // Instantiate Command
-const command = new Command({ tool, saveContext });
+const command = new Command({ tool, saveContext, pruneContext: pruneContextForAPI, livepruneRef });
 
 async function loadContext() {
     try {
@@ -153,7 +301,9 @@ async function main() {
 
         while (true) {
             try {
-                const response = await fetchCompletion(messages);
+                // Prune context before sending to API if liveprune is enabled
+                const messagesToSend = pruneContextForAPI(messages);
+                const response = await fetchCompletion(messagesToSend);
 
                 // Track token usage
                 if (response.usage) {
@@ -190,9 +340,10 @@ async function main() {
                             Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 16 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
                         );
                         displayMessage('tool', `${tc.function.name}${JSON.stringify(abbreviatedArgs)}`);
-                        const result = await tool.executeTool(tc.function.name, args);
+                        const structuredResult = await tool.executeTool(tc.function.name, args);
                         messages.push({ role: 'assistant', content: null, tool_calls: [tc] });
-                        messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
+                        // Store structured result error as metadata for live-pruning
+                        messages.push({ role: 'tool', tool_call_id: tc.id, content: structuredResult.result, _toolError: structuredResult.error });
                     }
                 } else {
                     // Final text response

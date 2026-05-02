@@ -27,6 +27,8 @@ export class Tool {
         this.filesDirtyAfterRead = new Set();
         // Pending previews awaiting apply_preview: Map<id, pendingEdit>
         this.pendingPreviews = new Map();
+        // Stale results for read_stale tool
+        this.staleResults = new Map();
     }
 
     static TOOLS = [
@@ -175,6 +177,18 @@ export class Tool {
                         text: { type: 'string', description: 'The text to output' }
                     },
                     required: ['text']
+                }
+            }
+        },
+        {
+            type: 'function',
+            function: {
+                name: 'read_stale',
+                description: 'Retrieve a stale result that was excluded from context. Use this when you need content that was pruned from the conversation.',
+                parameters: {
+                    type: 'object',
+                    properties: { content_id: { type: 'integer', description: 'The index of the context entry to retrieve' } },
+                    required: ['content_id']
                 }
             }
         }
@@ -497,6 +511,23 @@ export class Tool {
         return text;
     }
 
+    read_stale({ content_id }) {
+        if (content_id === undefined || content_id === null) {
+            throw new ToolError('content_id is required.');
+        }
+        const id = parseInt(content_id, 10);
+        if (isNaN(id)) {
+            throw new ToolError(`content_id must be an integer, got ${JSON.stringify(content_id)}.`);
+        }
+        if (id < 0) {
+            throw new ToolError(`content_id must be >= 0, got ${id}.`);
+        }
+        if (!this.staleResults || !this.staleResults.has(id)) {
+            throw new ToolError(`No stale result found at index ${id}.`);
+        }
+        return this.staleResults.get(id);
+    }
+
     // --- Helper functions ---
 
     /**
@@ -697,26 +728,27 @@ export class Tool {
         const dump = (v) => { console.log(v); return v; };
         try {
             switch (name) {
-                case 'list_files': return await this.list_files(args);
-                case 'read_file': return await this.read_file(args);
-                case 'create_file': return await this.create_file(args);
-                case 'edit_file': return await this.edit_file(args);
-                case 'apply_preview': return await this.apply_preview(args);
-                case 'undo': return await this.undo();
-                case 'search_files': return await this.search_files(args);
-                case 'syntax_check': return await this.syntax_check(args);
-                case 'calc': return this.calc(args);
-                case 'todo': return this.todo(args);
-                default: return `Unknown tool: ${name}`;
+                case 'list_files': return { result: await this.list_files(args), error: null, toolName: name };
+                case 'read_file': return { result: await this.read_file(args), error: null, toolName: name };
+                case 'create_file': return { result: await this.create_file(args), error: null, toolName: name };
+                case 'edit_file': return { result: await this.edit_file(args), error: null, toolName: name };
+                case 'apply_preview': return { result: await this.apply_preview(args), error: null, toolName: name };
+                case 'undo': return { result: await this.undo(), error: null, toolName: name };
+                case 'search_files': return { result: await this.search_files(args), error: null, toolName: name };
+                case 'syntax_check': return { result: await this.syntax_check(args), error: null, toolName: name };
+                case 'calc': return { result: this.calc(args), error: null, toolName: name };
+                case 'todo': return { result: this.todo(args), error: null, toolName: name };
+                case 'read_stale': return { result: this.read_stale(args), error: null, toolName: name };
+                default: return { result: `Unknown tool: ${name}`, error: null, toolName: name };
             }
         } catch (err) {
             if (err instanceof ToolError) {
                 const call = JSON.stringify({ name, args });
                 if (call === this.lastErrorCall) {
-                    return "Identical tool call detected. Read the previous error message carefully, analyse the problem and make a correct tool call.";
+                    return { result: "Identical tool call detected. Read the previous error message carefully, analyse the problem and make a correct tool call.", error: null, toolName: name };
                 }
                 this.lastErrorCall = call;
-                return err.message;
+                return { result: err.message, error: err.message, toolName: name };
             }
             throw err;
         }
