@@ -106,7 +106,7 @@ async function main() {
     const messages = [{ role: 'system', content: SYSTEM_PROMPT }, ...previousMessages];
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-    console.log('🚀 LLM Coding Harness started. Type "exit" to quit.\n');
+    console.log('🚀 LLM Coding Harness started. Type "/exit" to quit.\n');
 
     while (true) {
         const userPrompt = await new Promise(resolve => rl.question('> ', resolve));
@@ -206,7 +206,7 @@ async function main() {
                     }
                 }
 
-                // Fix: Use ?.length to avoid truthy empty arrays
+                // Handle tool calls
                 if (msg.tool_calls?.length) {
                     // Display any text message the model included with the tool call
                     const assistantMsg = { role: 'assistant', content: msg.content };
@@ -222,7 +222,7 @@ async function main() {
                         const abbreviatedArgs = Object.fromEntries(
                             Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 10 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
                         );
-                        displayMessage('tool', `${tc.function.name}, Args: ${JSON.stringify(abbreviatedArgs)}`);
+                        displayMessage('tool', `${tc.function.name}${JSON.stringify(abbreviatedArgs)}`);
                         const result = await tool.executeTool(tc.function.name, args);
                         messages.push({ role: 'assistant', content: null, tool_calls: [tc] });
                         messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
