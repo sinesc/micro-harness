@@ -5,7 +5,16 @@ import util from 'util';
 
 const execAsync = util.promisify(exec);
 
+export class ToolError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'ToolError';
+    }
+}
+
 export class Tool {
+    lastErrorCall = null;
+
     constructor() {
         // Track cumulative offsets per file: Map<filePath, Map<lineNum, offset>>
         this.fileOffsetMaps = new Map();
@@ -13,6 +22,8 @@ export class Tool {
         this.editHistory = [];
         // Track file checksums to detect external changes
         this.fileChecksums = new Map();
+        // Files that have been successfully edited since the last read_file call
+        this.filesDirtyAfterRead = new Set();
     }
 
     static TOOLS = [
@@ -59,21 +70,20 @@ export class Tool {
             type: 'function',
             function: {
                 name: 'edit_file',
-                description: 'Replace a range of lines in a file with new text. start_line and end_line are 1-indexed line numbers (integer). Use inclusive=false to preserve the start/end lines and only replace the text between them.',
+                description: 'Replace an inclusive range of lines (start_line through end_line) with new content. To prevent accidental line removal, the replacement must include anchor lines that match the file exactly: unless start_line is the first line of the file, the first line of replacement must equal the current content of start_line; unless end_line is the last line of the file, the last line of replacement must equal the current content of end_line. Example — to insert "c" between lines 2 ("b") and 3 ("d") use start_line=2, end_line=3, replacement="b\\nc\\nd".',
                 parameters: {
                     type: 'object',
                     properties: {
                         path: { type: 'string', description: 'File path' },
                         start_line: {
-                            description: 'Start of the replacement range: a 1-indexed line number',
+                            description: 'Start of the replacement range (1-indexed). Unless this is line 1 of the file, the first line of replacement must exactly match its current content.',
                             oneOf: [{ type: 'integer' }, { type: 'string' }]
                         },
                         end_line: {
-                            description: 'End of the replacement range: a 1-indexed line number',
+                            description: 'End of the replacement range (1-indexed). Unless this is the last line of the file, the last line of replacement must exactly match its current content.',
                             oneOf: [{ type: 'integer' }, { type: 'string' }]
                         },
-                        replacement: { type: 'string', description: 'Text to replace the specified lines with' },
-                        inclusive: { type: 'boolean', description: 'When true (default), start_line and end_line are replaced along with the lines between them. When false, start_line and end_line are kept and only the lines between them are replaced.' }
+                        replacement: { type: 'string', description: 'New content for the range. Must begin with the exact text of start_line (leading anchor) and end with the exact text of end_line (trailing anchor), unless those lines are at the file boundary.' }
                     },
                     required: ['path', 'start_line', 'end_line', 'replacement']
                 }
@@ -157,7 +167,7 @@ export class Tool {
             const entries = await fs.readdir(dir, { withFileTypes: true });
             return entries.map(e => `${e.isDirectory() ? '📁 ' : '📄 '}${e.name}`).join('\n');
         } catch (err) {
-            return `Error: Cannot list directory '${dir}': ${err.message}`;
+            throw new ToolError(`Cannot list directory '${dir}': ${err.message}`);
         }
     }
 
@@ -168,11 +178,12 @@ export class Tool {
             if (this.fileOffsetMaps.has(filePath)) {
                 this.fileOffsetMaps.delete(filePath);
             }
-            this.fileChecksums.set(filePath, this.#computeChecksum(content));  // Update checksum on read
+            this.fileChecksums.set(filePath, this.#computeChecksum(content));
+            this.filesDirtyAfterRead.delete(filePath);
             let line = 1;
             return content.split(/\r?\n/).map((text, index) => `${index+1}\t${text}`).join("\n");
         } catch (err) {
-            return `Error: Cannot read file '${filePath}': ${err.message}`;
+            throw new ToolError(`Cannot read file '${filePath}': ${err.message}`);
         }
     }
 
@@ -182,13 +193,13 @@ export class Tool {
             this.fileChecksums.set(filePath, this.#computeChecksum(content));  // Set initial checksum
             return `Created file ${filePath} with ${content.split(/\r?\n/).length} line(s).`;
         } catch (err) {
-            return `Error: Cannot create file '${filePath}': ${err.message}`;
+            throw new ToolError(`Cannot create file '${filePath}': ${err.message}`);
         }
     }
 
     async undo() {
         if (this.editHistory.length === 0) {
-            return 'No edits to undo.';
+            throw new ToolError('No edits to undo.');
         }
 
         const lastEdit = this.editHistory.pop();
@@ -196,154 +207,205 @@ export class Tool {
         const content = lastEdit.content;
         const offsetMap = lastEdit.offsetMap;
 
-        try {
-            // Write the file back to its previous state
-            await fs.writeFile(filePath, content, 'utf-8');
+        // Write the file back to its previous state
+        await fs.writeFile(filePath, content, 'utf-8');
 
-            // Restore the offset map for this file
-            this.fileOffsetMaps.set(filePath, new Map(offsetMap));
+        // Restore the offset map for this file
+        this.fileOffsetMaps.set(filePath, new Map(offsetMap));
 
-            // Restore the checksum
-            this.fileChecksums.set(filePath, this.#computeChecksum(content));
+        // Restore the checksum
+        this.fileChecksums.set(filePath, this.#computeChecksum(content));
 
-            return `Undid the last edit on ${filePath}.`;
-        } catch (err) {
-            return `Error: Cannot undo edit on '${filePath}': ${err.message}`;
-        }
+        return `Undid the last edit on ${filePath}.`;
     }
 
     async search_files({ pattern, dir = '.', file_pattern = null, max_results = 50 }) {
-        try {
-            const results = [];
-            const regex = new RegExp(pattern, 'i'); // case-insensitive by default
+        const results = [];
+        const regex = new RegExp(pattern, 'i'); // case-insensitive by default
 
-            async function searchDir(currentDir) {
-                const entries = await fs.readdir(currentDir, { withFileTypes: true });
+        async function searchDir(currentDir) {
+            const entries = await fs.readdir(currentDir, { withFileTypes: true });
 
-                for (const entry of entries) {
-                    const fullPath = `${currentDir}/${entry.name}`;
+            for (const entry of entries) {
+                const fullPath = `${currentDir}/${entry.name}`;
 
-                    // Skip hidden directories and node_modules
-                    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+                // Skip hidden directories and node_modules
+                if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
 
-                    // Apply file pattern filter if specified
-                    if (file_pattern) {
-                        const globRegex = Tool.#globToRegex(file_pattern);
-                        if (!globRegex.test(entry.name)) continue;
-                    }
+                // Apply file pattern filter if specified
+                if (file_pattern) {
+                    const globRegex = Tool.#globToRegex(file_pattern);
+                    if (!globRegex.test(entry.name)) continue;
+                }
 
-                    if (entry.isDirectory()) {
-                        await searchDir(fullPath);
-                    } else {
-                        try {
-                            const content = await fs.readFile(fullPath, 'utf-8');
-                            const lines = content.split(/\r?\n/);
+                if (entry.isDirectory()) {
+                    await searchDir(fullPath);
+                } else {
+                    try {
+                        const content = await fs.readFile(fullPath, 'utf-8');
+                        const lines = content.split(/\r?\n/);
 
-                            for (let i = 0; i < lines.length; i++) {
-                                if (regex.test(lines[i])) {
-                                    results.push({
-                                        file: fullPath,
-                                        line: i + 1,
-                                        content: lines[i].trim()
-                                    });
+                        for (let i = 0; i < lines.length; i++) {
+                            if (regex.test(lines[i])) {
+                                results.push({
+                                    file: fullPath,
+                                    line: i + 1,
+                                    content: lines[i].trim()
+                                });
 
-                                    if (results.length >= max_results) return;
-                                }
+                                if (results.length >= max_results) return;
                             }
-                        } catch (err) {
-                            // Skip files we can't read (binary, permissions, etc.)
                         }
+                    } catch (err) {
+                        // Skip files we can't read (binary, permissions, etc.)
                     }
                 }
             }
-
-            await searchDir.call(this, dir);
-
-            if (results.length === 0) {
-                return `No matches found for pattern "${pattern}"${file_pattern ? ` in files matching "${file_pattern}"` : ''}.`;
-            }
-
-            const output = results.map(r => `${r.file}:${r.line}: ${r.content}`).join('\n');
-            const total = results.length;
-            return `${output}\n\n---\nTotal: ${total} match(es) found.`;
-        } catch (err) {
-            return `Error: Cannot search directory '${dir}': ${err.message}`;
         }
+
+        await searchDir.call(this, dir);
+
+        if (results.length === 0) {
+            return `No matches found for pattern "${pattern}"${file_pattern ? ` in files matching "${file_pattern}"` : ''}.`;
+        }
+
+        const output = results.map(r => `${r.file}:${r.line}: ${r.content}`).join('\n');
+        const total = results.length;
+        return `${output}\n\n---\nTotal: ${total} match(es) found.`;
     }
 
-    async edit_file({ path: filePath, start_line, end_line, replacement, inclusive = true }) {
-        try {
-            const fileContent = await fs.readFile(filePath, 'utf-8');
+    async edit_file({ path: filePath, start_line, end_line, replacement }) {
+        // --- Parameter validation ---
+        if (start_line === undefined || start_line === null)
+            throw new ToolError(`You must specify a 'start_line' for the edit.`);
+        if (end_line === undefined || end_line === null)
+            throw new ToolError(`You must specify an 'end_line' for the edit.`);
+        if (filePath === undefined || filePath === null)
+            throw new ToolError(`You must specify the 'path' of the file you want to edit.`);
+        if (typeof filePath !== 'string')
+            throw new ToolError(`'path' must be an string.`);
+        if (replacement === undefined || replacement === null)
+            throw new ToolError(`You must specify a 'replacement' to perform.`);
+        if (typeof replacement !== 'string')
+            throw new ToolError(`'replacement' must be a string.`);
 
-            const previousChecksum = this.fileChecksums.get(filePath);
-            const currentChecksum = this.#computeChecksum(fileContent);
-            if (previousChecksum && previousChecksum !== currentChecksum) {
-                return `ERROR: File '${filePath}' has been modified externally since it was last read. Please call read_file first to refresh the file contents, then retry the edit.`;
-            }
+        const startLine = parseInt(start_line, 10);
+        const endLine = parseInt(end_line, 10);
 
-            const offsetMap = this.#getFileOffsetMap(filePath);
-            const lines = fileContent.split(/\r?\n/);
+        if (isNaN(startLine))
+            throw new ToolError(`'start_line' must be an integer, got ${JSON.stringify(start_line)}.`);
+        if (isNaN(endLine))
+            throw new ToolError(`'end_line' must be an integer, got ${JSON.stringify(end_line)}.`);
+        if (startLine < 1)
+            throw new ToolError(`'start_line' must be >= 1, got ${startLine}.`);
+        if (endLine < 1)
+            throw new ToolError(`'end_line' must be >= 1, got ${endLine}.`);
+        if (startLine > endLine)
+            throw new ToolError(`'start_line' (${startLine}) must not exceed 'end_line' (${endLine}).`);
 
-            // debug info
-            const dbgSummary = lines.length-2 > 0 ? lines.toSpliced(1, lines.length-2, '...') : lines.toSpliced(1, lines.length-2);
-            const dbgActualStart = start_line + this.#getOffset(offsetMap, start_line);
-            const dbgActualEndt = end_line + this.#getOffset(offsetMap, end_line);
-            console.log(`EDIT: ${start_line}-${end_line}, mapped to ${dbgActualStart}-${dbgActualEndt}, ${inclusive?'inclusive':'exclusive'}. `, dbgSummary);
-            // --
+        // --- File read and checksum ---
+        const fileContent = await fs.readFile(filePath, 'utf-8');
 
-            const actualStart = start_line + this.#getOffset(offsetMap, start_line);
-            if (actualStart < 1 || actualStart > lines.length)
-                return `Error: start_line ${start_line} is out of bounds, please re-read the file.`;
-            let startIdx = actualStart - 1;
-            let logicalStart = start_line;
+        const previousChecksum = this.fileChecksums.get(filePath);
+        const currentChecksum = this.#computeChecksum(fileContent);
+        if (previousChecksum && previousChecksum !== currentChecksum)
+            throw new ToolError(`File '${filePath}' has been modified externally since it was last read. Please call read_file first to refresh the file contents, then retry the edit.`);
 
-            const actualEnd = end_line + this.#getOffset(offsetMap, end_line);
-            if (actualEnd < 1 || actualEnd > lines.length)
-                return `Error: end_line ${end_line} is out of bounds, please re-read the file.`;
-            let endIdx = actualEnd - 1;
-            let logicalEnd = end_line;
+        // True when the model has successfully edited this file since the last read_file call,
+        // meaning re-reading will give fresher line numbers and content.
+        const dirty = this.filesDirtyAfterRead.has(filePath);
 
-            if (endIdx < startIdx)
-                return `Error: end_line (line ${endIdx + 1}) is before start_line (line ${startIdx + 1})`;//FIXME: need to report original line numbers (-offset) that the model can actually use with this tool!
-            if (!inclusive && endIdx === startIdx)
-                return `Error: start_line and end_line cannot be the same line when inclusive is false`;
+        const offsetMap = this.#getFileOffsetMap(filePath);
+        const lines = fileContent.split(/\r?\n/);
 
-            this.editHistory.push({ path: filePath, content: fileContent, offsetMap: new Map(offsetMap) });
+        const rereadOrFix = dirty ? 'Re-read the file to get current line numbers.' : 'Check that your line numbers are correct.';
 
-            const spliceStart = inclusive ? startIdx : startIdx + 1;
-            const numDeleted = inclusive ? endIdx - startIdx + 1 : endIdx - startIdx - 1;
-            const logicalSpliceStart = inclusive ? logicalStart : logicalStart + 1;
-            const logicalSpliceEnd = inclusive ? logicalEnd : logicalEnd - 1;
-            // Empty string means delete (no replacement lines).
-            // Strip one trailing newline before splitting so that a conventional
-            // line-terminated replacement ("foo\n") is treated as one line, not two.
-            const newLines = replacement === '' ? [] : replacement.replace(/\r?\n$/, '').split(/\r?\n/);
-            this.#editSplice(offsetMap, lines, spliceStart, numDeleted, newLines, logicalSpliceStart, logicalSpliceEnd);
+        const actualStart = startLine + this.#getOffset(offsetMap, startLine);
+        if (actualStart < 1 || actualStart > lines.length)
+            throw new ToolError(`'start_line' ${startLine} resolves to line ${actualStart}, which is out of bounds (file has ${lines.length} line${lines.length !== 1 ? 's' : ''}). ${rereadOrFix}`);
+        let startIdx = actualStart - 1;
 
-            const newContent = lines.join('\n');
-            await fs.writeFile(filePath, newContent, 'utf-8');
-            this.fileChecksums.set(filePath, this.#computeChecksum(newContent));
+        const actualEnd = endLine + this.#getOffset(offsetMap, endLine);
+        if (actualEnd < 1 || actualEnd > lines.length)
+            throw new ToolError(`'end_line' ${endLine} resolves to line ${actualEnd}, which is out of bounds (file has ${lines.length} line${lines.length !== 1 ? 's' : ''}). ${rereadOrFix}`);
+        let endIdx = actualEnd - 1;
 
-            return 'Replacement complete.';
-            /*const replacedStart = spliceStart + 1;
-            const replacedEnd = spliceStart + numDeleted;
-            const rangeStr = numDeleted > 0 ? `lines ${replacedStart}-${replacedEnd}` : `between lines ${startIdx + 1} and ${endIdx + 1}`;
-            return `Replaced ${rangeStr} (${numDeleted} line(s)) with ${newLines.length} line(s).`;*/
-        } catch (err) {
-            return `Error: Cannot replace text in '${filePath}': ${err.message}`;
+        if (endIdx < startIdx)
+            throw new ToolError(`Resolved range is invalid — 'end_line' ${endLine} (actual line ${actualEnd}) is before 'start_line' ${startLine} (actual line ${actualStart}).`);
+
+        // Strip one trailing newline before splitting so that a line-terminated
+        // replacement ("foo\n") is treated as one line, not two.
+        const newLines = replacement === '' ? [] : replacement.replace(/\r?\n$/, '').split(/\r?\n/);
+
+        // Anchor validation: the first/last lines of replacement must match the
+        // file at start_line/end_line to prevent silently dropping content.
+        // Anchors are waived at file boundaries.  Resolution priority per anchor:
+        //   1. exact at expected position  2. trim at expected position
+        //   3. exact fuzzy ±3 lines        4. trim fuzzy ±3 lines
+        const FUZZY_RADIUS = 5;
+        let startDelta = 0;
+        let endDelta = 0;
+        let startTrimFixed = false;
+        let endTrimFixed = false;
+
+        if (startIdx !== 0) {
+            if (newLines.length === 0)
+                throw new ToolError(
+                    `'replacement' is empty but 'start_line' ${startLine} is not the first line of the file.\n` +
+                    `The first line of 'replacement' must exactly match line ${actualStart} as a leading anchor:\n` +
+                    `  "${lines[startIdx]}"`
+                );
+            ({ idx: startIdx, delta: startDelta, trimFixed: startTrimFixed } =
+                this.#resolveAnchor(lines, newLines[0], startIdx, FUZZY_RADIUS, 'Leading', dirty));
         }
+
+        if (endIdx !== lines.length - 1) {
+            if (newLines.length === 0)
+                throw new ToolError(
+                    `'replacement' is empty but 'end_line' ${endLine} is not the last line of the file.\n` +
+                    `The last line of 'replacement' must exactly match line ${actualEnd} as a trailing anchor:\n` +
+                    `  "${lines[endIdx]}"`
+                );
+            ({ idx: endIdx, delta: endDelta, trimFixed: endTrimFixed } =
+                this.#resolveAnchor(lines, newLines[newLines.length - 1], endIdx, FUZZY_RADIUS, 'Trailing', dirty));
+        }
+
+        // Restore correct whitespace in any trim-matched anchor lines so the file
+        // is not written back with the model's incorrect indentation.
+        if (startTrimFixed) newLines[0] = lines[startIdx];
+        if (endTrimFixed) newLines[newLines.length - 1] = lines[endIdx];
+
+        // Re-validate range after fuzzy corrections
+        if (endIdx < startIdx)
+            throw new ToolError(`After anchor correction, the edit range is invalid — corrected start (line ${startIdx + 1}) is after corrected end (line ${endIdx + 1}).`);
+
+        this.editHistory.push({ path: filePath, content: fileContent, offsetMap: new Map(offsetMap) });
+
+        this.#editSplice(offsetMap, lines, startIdx, endIdx - startIdx + 1, newLines, startLine, endLine + endDelta);
+
+        const newContent = lines.join('\n');
+        await fs.writeFile(filePath, newContent, 'utf-8');
+        this.fileChecksums.set(filePath, this.#computeChecksum(newContent));
+        this.filesDirtyAfterRead.add(filePath);
+
+        if (startDelta !== 0 || endDelta !== 0 || startTrimFixed || endTrimFixed) {
+            const notes = [];
+            if (startDelta !== 0) notes.push(`start_line shifted by ${startDelta > 0 ? '+' : ''}${startDelta}`);
+            if (endDelta !== 0) notes.push(`end_line shifted by ${endDelta > 0 ? '+' : ''}${endDelta}`);
+            if (startTrimFixed) notes.push('leading anchor matched after ignoring whitespace (corrected in output)');
+            if (endTrimFixed) notes.push('trailing anchor matched after ignoring whitespace (corrected in output)');
+            const rereadHint = startDelta !== 0 ? ' Re-read the file before making further edits near the start of the corrected range.' : '';
+            return `Edit successful.`; // Note: ${notes.join('; ')}.${rereadHint}`;
+        }
+        return 'Edit successful.';
     }
 
     async syntax_check({ path: filePath }) {
-        try {
-            const { stdout, stderr } = await execAsync(`node -c "${filePath}"`);
-            if (stderr) {
-                return stderr.trim();
-            }
-            return `Syntax check passed for ${filePath}.`;
-        } catch (err) {
-            return `Syntax error in ${filePath}: ${err.stderr?.trim() || err.message}`;
+        const { stdout, stderr } = await execAsync(`node -c "${filePath}"`);
+        if (stderr) {
+            throw new ToolError(stderr.trim());
         }
+        return `Syntax check passed for ${filePath}.`;
     }
 
     calc({ expression }) {
@@ -352,11 +414,12 @@ export class Tool {
             const result = new Function('return ' + filtered)();
             return `Result: ${result}`;
         } catch (err) {
-            return `Error: Could not evaluate expression "${filtered}": ${err.message}`;
+            throw new ToolError(`Could not evaluate expression "${filtered}": ${err.message}`);
         }
     }
 
     todo({ text }) {
+        console.log(`\n${text}`);
         return text;
     }
 
@@ -382,6 +445,56 @@ export class Tool {
             else break;
         }
         return offset;
+    }
+
+    // Resolves one anchor (leading or trailing) against the file's lines.
+    // Priority: exact at position → trim at position → exact fuzzy → trim fuzzy.
+    // Returns { idx, delta, trimFixed } or throws ToolError.
+    #resolveAnchor(lines, anchorText, idealIdx, radius, label, dirty) {
+        if (lines[idealIdx] === anchorText)
+            return { idx: idealIdx, delta: 0, trimFixed: false };
+
+        if (lines[idealIdx].trim() === anchorText.trim())
+            return { idx: idealIdx, delta: 0, trimFixed: true };
+
+        const lo = Math.max(0, idealIdx - radius);
+        const hi = Math.min(lines.length - 1, idealIdx + radius);
+
+        const exactMatches = [];
+        for (let i = lo; i <= hi; i++) {
+            if (lines[i] === anchorText) exactMatches.push(i);
+        }
+        if (exactMatches.length === 1)
+            return { idx: exactMatches[0], delta: exactMatches[0] - idealIdx, trimFixed: false };
+        if (exactMatches.length > 1)
+            throw new ToolError(
+                `${label} anchor is ambiguous — the provided line has exact matches at lines ${exactMatches.map(i => i + 1).join(', ')} within ±${radius}.\n` +
+                `  Provided: "${anchorText}"\n` +
+                `Use a more specific line number.`
+            );
+
+        const trimMatches = [];
+        for (let i = lo; i <= hi; i++) {
+            if (lines[i].trim() === anchorText.trim()) trimMatches.push(i);
+        }
+        if (trimMatches.length === 1)
+            return { idx: trimMatches[0], delta: trimMatches[0] - idealIdx, trimFixed: true };
+        if (trimMatches.length > 1)
+            throw new ToolError(
+                `${label} anchor is ambiguous — the provided line (ignoring whitespace) has matches at lines ${trimMatches.map(i => i + 1).join(', ')} within ±${radius}.\n` +
+                `  Provided: "${anchorText}"\n` +
+                `Use a more specific line number.`
+            );
+
+        const rereadOrFix = dirty
+            ? 'Re-read the file to get the current content and line numbers.'
+            : 'Fix the anchor to match the file line shown above. If your intention is to change one of the anchor lines you must decrease start_line and increase end_line so that the line you want to change is no longer an anchor line.';
+        throw new ToolError(
+            `${label} anchor mismatch — the provided line does not match line ${idealIdx + 1} of the file and was not found within ±${radius} lines.\n` +
+            `  Provided:  "${anchorText}"\n` +
+            `  File line: "${lines[idealIdx]}"\n` +
+            rereadOrFix
+        );
     }
 
     #editSplice(offsetMap, currentLines, startIdx, numDelete, insertLines, logicalStartLine, logicalEndLine) {
@@ -422,17 +535,30 @@ export class Tool {
     // --- executeTool ---
 
     async executeTool(name, args) {
-        switch (name) {
-            case 'list_files': return await this.list_files(args);
-            case 'read_file': return await this.read_file(args);
-            case 'create_file': return await this.create_file(args);
-            case 'edit_file': return await this.edit_file(args);
-            case 'undo': return await this.undo();
-            case 'search_files': return await this.search_files(args);
-            case 'syntax_check': return await this.syntax_check(args);
-            case 'calc': return this.calc(args);
-            case 'todo': return this.todo(args);
-            default: return `Unknown tool: ${name}`;
+        const dump = (v) => { console.log(v); return v; };
+        try {
+            switch (name) {
+                case 'list_files': return await this.list_files(args);
+                case 'read_file': return await this.read_file(args);
+                case 'create_file': return await this.create_file(args);
+                case 'edit_file': return await this.edit_file(args);
+                case 'undo': return await this.undo();
+                case 'search_files': return await this.search_files(args);
+                case 'syntax_check': return await this.syntax_check(args);
+                case 'calc': return this.calc(args);
+                case 'todo': return this.todo(args);
+                default: return `Unknown tool: ${name}`;
+            }
+        } catch (err) {
+            if (err instanceof ToolError) {
+                const call = JSON.stringify({ name, args });
+                if (call === this.lastErrorCall) {
+                    return "Stop making identical tool calls. Read the previous error message carefully, analyse the problem and make a correct tool call.";
+                }
+                this.lastErrorCall = call;
+                return err.message;
+            }
+            throw err;
         }
     }
 }
