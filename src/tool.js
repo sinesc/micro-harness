@@ -523,7 +523,7 @@ export class Tool {
     }
 
     todo({ text }) {
-        console.log(`\n${text}`);
+        console.log(`\n${text}\n`);
         return text;
     }
 
