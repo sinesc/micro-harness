@@ -19,15 +19,13 @@ export class MessageContext {
     }
 
     /*
-     * Prune stale/useless context entries before sending to API.
-     * Returns a filtered copy of messages (excluding system prompt).
-     * Optimized to O(N) time complexity.
+     * Returns context prepared for API request (strips local meta-data, optionally prunes redundant messages).
      */
-    pruneForAPI(livepruneEnabled) {
+    prepared(livepruneEnabled) {
         const messages = this.messages;
 
         if (!livepruneEnabled) {
-            return messages.filter(m => m.role !== 'system');
+            return messages;
         }
 
         // Find the index of the last user message
@@ -210,7 +208,7 @@ export class MessageContext {
     getStatistics(livepruneEnabled) {
         const messages = this.messages;
         const fullCount = messages.length;
-        const prunedMessages = this.pruneForAPI(livepruneEnabled);
+        const prunedMessages = this.prepared(livepruneEnabled);
         const prunedCount = prunedMessages.length;
         const removedCount = fullCount - prunedCount;
 

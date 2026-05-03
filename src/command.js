@@ -10,17 +10,13 @@ export class Command {
         this.application = application;
     }
 
-    get livepruneEnabled() {
-        return this.application.livepruneRef.value;
-    }
-
     async help() {
-        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/liveprune - Toggle live pruning of stale context (currently ${this.livepruneEnabled ? 'ON' : 'OFF'})\n/reset - Clear current context (keeping only system prompt)`;
+        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/liveprune - Toggle live pruning of stale context (currently ${this.application.liveprune ? 'ON' : 'OFF'})\n/reset - Clear current context (keeping only system prompt)`;
     }
 
     toggleLiveprune() {
-        this.application.livepruneRef.value = !this.application.livepruneRef.value;
-        return `Live pruning is now ${this.application.livepruneRef.value ? 'ON' : 'OFF'}.`;
+        this.application.liveprune = !this.application.liveprune;
+        return `Live pruning is now ${this.application.liveprune ? 'ON' : 'OFF'}.`;
     }
 
     async exit() {
@@ -77,7 +73,7 @@ export class Command {
     }
 
     async context() {
-        const stats = this.application.context.getStatistics(this.livepruneEnabled);
+        const stats = this.application.context.getStatistics(this.application.liveprune);
 
         let output = `📊 Context Statistics:\n\n`;
         output += `  Messages: ${stats.fullCount} (full) → ${stats.prunedCount} (pruned) | Removed: ${stats.removedCount}\n`;

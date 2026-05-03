@@ -56,7 +56,7 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
 
         // Instantiate Tool
         this.tool = new Tool(this);
-        this.livepruneRef = { value: false };
+        this.liveprune = false;
 
         // Instantiate Command
         this.command = new Command(this);
@@ -154,7 +154,7 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
             while (true) {
                 try {
                     // Prune context before sending to API if liveprune is enabled
-                    const messagesToSend = this.context.pruneForAPI(this.livepruneRef.value);
+                    const messagesToSend = this.context.prepared(this.liveprune);
                     const response = await this.fetchCompletion(messagesToSend);
 
                     // Track token usage
