@@ -377,7 +377,7 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
                             this.displayMessage('tool', `${tc.function.name} ${JSON.stringify(abbreviatedArgs).slice(1, -1)}`, structuredResult.error ? 'red' : 'grey');
                             this.messages.push({ role: 'assistant', content: null, tool_calls: [tc] });
                             // Store structured result error as metadata for live-pruning
-                            this.messages.push({ role: 'tool', tool_call_id: tc.id, content: structuredResult.result, _toolError: structuredResult.error });
+                            this.messages.push({ role: 'tool', tool_call_id: tc.id, content: structuredResult.error ? 'ERROR: ' + structuredResult.result : structuredResult.result, _toolError: structuredResult.error });
                         }
                     } else {
                         // Final text response

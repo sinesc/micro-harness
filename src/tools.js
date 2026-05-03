@@ -312,15 +312,15 @@ export class Tool {
     async edit_file({ path: filePath, start_line, end_line, replacement, preview = false }) {
         // --- Parameter validation ---
         if (start_line === undefined || start_line === null)
-            throw new ToolError(`You must specify a 'start_line' for the edit.`);
+            throw new ToolError(`Specify 'start_line' for the edit.`);
         if (end_line === undefined || end_line === null)
-            throw new ToolError(`You must specify an 'end_line' for the edit.`);
+            throw new ToolError(`Specify 'end_line' for the edit.`);
         if (filePath === undefined || filePath === null)
-            throw new ToolError(`You must specify the 'path' of the file you want to edit.`);
+            throw new ToolError(`Specify 'path' of the file to edit.`);
         if (typeof filePath !== 'string')
-            throw new ToolError(`'path' must be an string.`);
+            throw new ToolError(`'path' must be a string.`);
         if (replacement === undefined || replacement === null)
-            throw new ToolError(`You must specify a 'replacement' to perform.`);
+            throw new ToolError(`Specify 'replacement' to perform.`);
         if (typeof replacement !== 'string')
             throw new ToolError(`'replacement' must be a string.`);
 
@@ -345,7 +345,7 @@ export class Tool {
         const previousChecksum = this.fileChecksums.get(resolvedPath);
         const currentChecksum = this.#computeChecksum(fileContent);
         if (previousChecksum && previousChecksum !== currentChecksum)
-            throw new ToolError(`File '${filePath}' has been modified externally since it was last read. Please call read_file first to refresh the file contents, then retry the edit.`);
+            throw new ToolError(`File '${filePath}' modified externally. Call read_file first, then retry the edit.`);
 
         const dirty = this.filesDirtyAfterRead.has(resolvedPath);
         const offsetMap = this.#getFileOffsetMap(resolvedPath);
@@ -353,16 +353,16 @@ export class Tool {
 
         const actualStart = startLine + this.#getOffset(offsetMap, startLine);
         if (actualStart < 1 || actualStart > lines.length)
-            throw new ToolError(`start_line is out of bounds after considering previous edits. Re-read the file.`);
+            throw new ToolError(`start_line out of bounds after previous edits. Re-read the file.`);
         let startIdx = actualStart - 1;
 
         const actualEnd = endLine + this.#getOffset(offsetMap, endLine);
         if (actualEnd < 1 || actualEnd > lines.length)
-            throw new ToolError(`end_line is out of bounds after considering previous edits. Re-read the file.`);
+            throw new ToolError(`end_line out of bounds after previous edits. Re-read the file.`);
         let endIdx = actualEnd - 1;
 
         if (endIdx < startIdx)
-            throw new ToolError(`Range is invalid after considering previous edits. Re-read the file.`);
+            throw new ToolError(`Range invalid after previous edits. Re-read the file.`);
 
         // Strip one trailing newline before splitting so that a line-terminated
         // replacement ("foo\n") is treated as one line, not two.
@@ -372,11 +372,11 @@ export class Tool {
 
         if (newLines.length < 2 && !atBoundary) {
             console.log(atBoundary, actualStart, actualEnd, newLines.length, lines.length);
-            throw new ToolError(`Your replacement MUST contain at least two lines: the top anchor line, optionally a replacement (omit to delete), the bottom anchor line.`);
+            throw new ToolError(`Replacement MUST contain at least two lines: the top anchor line, optionally a replacement (omit to delete), the bottom anchor line.`);
         }
 
         if (actualEnd - actualStart < 1 && !atBoundary) {
-            throw new ToolError(`'end_line' must always be greater than 'start_line' since the first and last line of your edit are REQUIRED to be unmodified anchor lines. If you were trying to edit a single line, include the line above and below it in your edit.`);
+            throw new ToolError(`'end_line' must be greater than 'start_line' since the first and last line of your edit are REQUIRED to be unmodified anchor lines. If editing a single line, include the line above and below it in your edit.`);
         }
 
         // Anchor validation: the first/last lines of replacement must match the
@@ -430,7 +430,7 @@ export class Tool {
             if (startTrimFixed) newLinesForApply[0] = lines[startIdx];
             if (endTrimFixed) newLinesForApply[newLinesForApply.length - 1] = lines[endIdx];
             const reason = (startError || endError)
-                ? 'One anchor matched but the other did not — check this preview carefully for unintentionally duplicated/removed lines.'
+                ? 'One anchor matched but the other did not — check this preview for unintentionally duplicated/removed lines.'
                 : null;
             return this.#generatePreviewResponse(
                 filePath, fileContent, currentChecksum, lines, offsetMap,
@@ -445,7 +445,7 @@ export class Tool {
 
         // Re-validate range after fuzzy corrections
         if (endIdx < startIdx)
-            throw new ToolError(`Range is invalid after considering previous edits. Re-read the file.`);
+            throw new ToolError(`Range invalid after previous edits. Re-read the file.`);
 
         this.editHistory.push({ path: resolvedPath, content: fileContent, offsetMap: new Map(offsetMap) });
 
@@ -454,7 +454,7 @@ export class Tool {
         const newContent = lines.join('\n');
         const syntaxError = await this.#check_file(newContent, resolvedPath);
         if (syntaxError) {
-            const reason = `Syntax error detected in the requested edit:\n${syntaxError}\nPlease review the changes and consider adjusting your edit.`;
+            const reason = `Syntax error in the requested edit:\n${syntaxError}\nReview the changes and adjust your edit.`;
             return this.#generatePreviewResponse(
                 filePath, fileContent, currentChecksum, lines, offsetMap,
                 startIdx, endIdx, newLines, startLine, endLine + endDelta, reason
@@ -475,7 +475,7 @@ export class Tool {
 
         const currentContent = await fs.readFile(filePath, 'utf-8');
         if (this.#computeChecksum(currentContent) !== checksum)
-            throw new ToolError(`File '${filePath}' has changed since this preview was generated. Re-read the file and retry the edit.`);
+            throw new ToolError(`File '${filePath}' changed since this preview was generated. Re-read the file and retry the edit.`);
 
         const lines = currentContent.split(/\r?\n/);
 
@@ -547,7 +547,7 @@ export class Tool {
      */
     _resolvePath(relativePath) {
         if (path.isAbsolute(relativePath)) {
-            throw new ToolError(`Absolute paths are not allowed. Please provide a relative path.`);
+            throw new ToolError(`Absolute paths not allowed. Provide a relative path.`);
         }
 
         const resolved = path.resolve(process.cwd(), relativePath);
@@ -559,7 +559,7 @@ export class Tool {
             throw new ToolError(
                 `Path '${relativePath}' resolves outside the working directory. ` +
                 `Resolved path: '${resolved}'. ` +
-                `Please provide a path within the current working directory.`
+                `Provide a path within the current working directory.`
             );
         }
 
@@ -672,7 +672,7 @@ export class Tool {
             return { idx: exactMatches[0], delta: exactMatches[0] - idealIdx, trimFixed: false };
         if (exactMatches.length > 1)
             throw new ToolError(
-                `${label} anchor is ambiguous — the provided line has exact matches at lines ${exactMatches.map(i => i + 1).join(', ')} within ±${radius}.\n` +
+                `${label} anchor ambiguous — the provided line has exact matches at lines ${exactMatches.map(i => i + 1).join(', ')} within ±${radius}.\n` +
                 `  Provided: "${anchorText}"\n` +
                 `Use a more specific line number.`
             );
@@ -685,13 +685,13 @@ export class Tool {
             return { idx: trimMatches[0], delta: trimMatches[0] - idealIdx, trimFixed: true };
         if (trimMatches.length > 1)
             throw new ToolError(
-                `${label} anchor is ambiguous — the provided line (ignoring whitespace) has matches at lines ${trimMatches.map(i => i + 1).join(', ')} within ±${radius}.\n` +
+                `${label} anchor ambiguous — the provided line (ignoring whitespace) has matches at lines ${trimMatches.map(i => i + 1).join(', ')} within ±${radius}.\n` +
                 `  Provided: "${anchorText}"\n` +
                 `Use a more specific line number.`
             );
 
         const rereadOrFix = dirty
-            ? 'Re-read the file to get the current content and line numbers.'
+            ? 'Re-read the file for the current content and line numbers.'
             : 'Fix the anchor to match the file line shown above, or re-read the file.';
         throw new ToolError(
             `${label} anchor mismatch — the provided line does not match line ${idealIdx + 1} of the file and was not found within ±${radius} lines.\n` +
