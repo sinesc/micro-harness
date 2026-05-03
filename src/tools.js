@@ -452,6 +452,14 @@ export class Tool {
         this.#editSplice(offsetMap, lines, startIdx, endIdx - startIdx + 1, newLines, startLine, endLine + endDelta);
 
         const newContent = lines.join('\n');
+        const syntaxError = await this.#check_file(newContent, resolvedPath);
+        if (syntaxError) {
+            const reason = `Syntax error detected in the requested edit:\n${syntaxError}\nPlease review the changes and consider adjusting your edit.`;
+            return this.#generatePreviewResponse(
+                filePath, fileContent, currentChecksum, lines, offsetMap,
+                startIdx, endIdx, newLines, startLine, endLine + endDelta, reason
+            );
+        }
         await fs.writeFile(resolvedPath, newContent, 'utf-8');
         this.fileChecksums.set(resolvedPath, this.#computeChecksum(newContent));
         this.filesDirtyAfterRead.add(resolvedPath);
@@ -487,18 +495,10 @@ export class Tool {
 
     async syntax_check({ path: filePath }) {
         const resolvedPath = this._resolvePath(filePath);
-        let stderr;
-        try {
-            let result = await execAsync(`acorn --module --ecma2024 --silent "${resolvedPath}"`);
-            stderr = result.stderr;
-        } catch (e) {
-            if (e.stderr === undefined) {
-                throw new Error('Failed to run external syntax check command');
-            }
-            stderr = e.stderr;
-        }
-        if (stderr) {
-            throw new ToolError(stderr.trim());
+        const content = await fs.readFile(resolvedPath, 'utf-8');
+        const error = await this.#check_file(content, resolvedPath);
+        if (error) {
+            throw new ToolError(error);
         }
         return `Syntax check passed for ${filePath}.`;
     }
@@ -724,6 +724,26 @@ export class Tool {
         const breakpointLine = logicalEndLine + 1;
         if (!offsetMap.has(breakpointLine)) {
             offsetMap.set(breakpointLine, prevOffset + netChange);
+        }
+    }
+
+    async #check_file(content, filePath) {
+        const isJSFile = filePath.endsWith('.js');
+        if (!isJSFile) return null;
+
+        const tmpFile = path.join(path.dirname(filePath), `.tmp_syntax_check_${Date.now()}.js`);
+        try {
+            await fs.writeFile(tmpFile, content, 'utf-8');
+            const result = await execAsync(`acorn --module --ecma2024 --silent "${tmpFile}"`);
+            const stderr = result.stderr;
+            if (stderr) return stderr.trim();
+            return null;
+        } finally {
+            try {
+                await fs.unlink(tmpFile);
+            } catch (e) {
+                // Ignore cleanup errors
+            }
         }
     }
 
