@@ -197,7 +197,7 @@ export class Tool {
         const resolvedDir = this._resolvePath(dir);
         try {
             const entries = await fs.readdir(resolvedDir, { withFileTypes: true });
-            return entries.map(e => `${e.isDirectory() ? '📁 ' : '📄 '}${e.name}`).join('\n');
+            return entries.filter(e => e.name.slice(0, 1) !== '_' && e.name.slice(0, 8) !== 'context.').map(e => `${e.isDirectory() ? '📁 ' : '📄 '}${e.name}`).join('\n');
         } catch (err) {
             throw new ToolError(`Cannot list directory '${dir}': ${err.message}`);
         }
@@ -378,7 +378,7 @@ export class Tool {
         if (actualEnd - actualStart < 1 && !atBoundary) {
             throw new ToolError(`'end_line' must always be greater than 'start_line' since the first and last line of your edit are REQUIRED to be unmodified anchor lines. If you were trying to edit a single line, include the line above and below it in your edit.`);
         }
-        
+
         // Anchor validation: the first/last lines of replacement must match the
         // file at start_line/end_line to prevent silently dropping content.
         // Anchors are waived at file boundaries.  Resolution priority per anchor:
@@ -547,10 +547,7 @@ export class Tool {
      */
     _resolvePath(relativePath) {
         if (path.isAbsolute(relativePath)) {
-            throw new ToolError(
-                `Absolute paths are not allowed. Received: '${relativePath}'. ` +
-                `Please provide a relative path.`
-            );
+            throw new ToolError(`Absolute paths are not allowed. Please provide a relative path.`);
         }
 
         const resolved = path.resolve(process.cwd(), relativePath);
@@ -564,6 +561,15 @@ export class Tool {
                 `Resolved path: '${resolved}'. ` +
                 `Please provide a path within the current working directory.`
             );
+        }
+
+        const protectedFiles = [ '.git' ];
+
+        for (const protectedFile of protectedFiles) {
+            const protectedPath = cwd + path.sep + protectedFile;
+            if (resolved.startsWith(protectedPath + path.sep) || resolved === protectedPath) {
+                throw new ToolError(`Direct access to ${protectedFile} is not allowed.`);
+            }
         }
 
         return resolved;
