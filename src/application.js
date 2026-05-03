@@ -35,7 +35,6 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
     constructor() {
         this.lmStudioUrl = Application.LM_STUDIO_URL;
         this.currentModel = 'local-model';
-        this.systemPrompt = Application.SYSTEM_PROMPT;
 
         // Token usage tracking
         this.totalPromptTokens = 0;
@@ -216,7 +215,6 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
     async run() {
         // Load previous context if it exists
         await this.context.load();
-        this.context.messages = [{ role: 'system', content: this.systemPrompt }, ...this.context.messages];
         this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
         console.log('🚀 LLM Coding Harness started. Type "/exit" to quit.\n');
@@ -256,7 +254,7 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
             while (true) {
                 try {
                     // Prune context before sending to API if liveprune is enabled
-                    const messagesToSend = this.context.prepared(this.liveprune);
+                    const messagesToSend = this.context.prepared(Application.SYSTEM_PROMPT, this.liveprune);
 
                     // Accumulators for streaming response
                     let streamedContent = '';

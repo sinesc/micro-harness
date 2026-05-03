@@ -18,201 +18,333 @@ export class MessageContext {
         return this.messages.pop();
     }
 
+    reset() {
+        this.messages = [];
+    }
+
     /*
      * Returns context prepared for API request (strips local meta-data, optionally prunes redundant messages).
      */
-    prepared(livepruneEnabled) {
-        const messages = this.messages;
+    prepared(systemPrompt, livepruneEnabled) {
+        let messages = [ { role: 'system', content: systemPrompt }, ...this.messages ];
 
         if (!livepruneEnabled) {
-            return messages;
+            return messages.map(m => this._stripMeta(m));
         }
 
-        // Find the index of the last user message
-        let lastUserIndex = -1;
+        // Build lookup maps
+        const toolCallMap = this._buildToolCallMap(messages);
+        const previewMap = this._buildPreviewMap(messages, toolCallMap);
+
+        // Iterate backwards through messages, building pruned result
+        const result = [];
+        const processedIndices = new Set();
+        const fullFilesEncountered = new Set();
+        let userMessageEncountered = false;
+
         for (let i = messages.length - 1; i >= 0; i--) {
-            if (messages[i].role === 'user') {
-                lastUserIndex = i;
-                break;
-            }
-        }
+            if (processedIndices.has(i)) continue;
 
-        const lastReadFileIndexByPath = new Map();
-        const lastFullReadFileIndexByPath = new Map();
-        const filesReReadAfterPreview = new Set();
-        let lastAssistantWithTools = null;
-
-        // First pass: gather metadata (O(N))
-        for (let i = 0; i <= lastUserIndex; i++) {
             const msg = messages[i];
 
-            if (msg.role === 'assistant' && msg.tool_calls) {
-                lastAssistantWithTools = msg;
-                for (const tc of msg.tool_calls) {
-                    if (tc.function.name === 'read_file') {
-                        const args = JSON.parse(tc.function.arguments);
-                        const pathArg = args.path;
-                        filesReReadAfterPreview.add(pathArg);
-                        lastReadFileIndexByPath.delete(pathArg);
-                    }
-                }
-            }
+            switch (msg.role) {
+                case 'system':
+                    result.push(msg);
+                    processedIndices.add(i);
+                    break;
 
-            if (msg.role === 'tool' && msg.content && !msg.content.includes('Stale result excluded')) {
-                const lines = msg.content.split('\n');
-                if (lines.length > 0 && /^\d+\t/.test(lines[0]) && lastAssistantWithTools) {
-                    for (const tc of lastAssistantWithTools.tool_calls) {
-                        if (tc.function.name === 'read_file') {
-                            const args = JSON.parse(tc.function.arguments);
-                            const pathArg = args.path;
-                            lastReadFileIndexByPath.set(pathArg, i);
-                            // Track full reads (no start_line/end_line) separately
-                            if (!args.start_line && !args.end_line) {
-                                lastFullReadFileIndexByPath.set(pathArg, i);
-                            }
-                        }
+                case 'user':
+                    userMessageEncountered = true;
+                    result.push(this._stripMeta(msg));
+                    processedIndices.add(i);
+                    break;
+
+                case 'tool':
+                    this._handleToolResult(msg, i, messages, toolCallMap, previewMap, fullFilesEncountered, userMessageEncountered, result, processedIndices);
+                    break;
+
+                case 'assistant':
+                    if (!msg.tool_calls) {
+                        result.push(this._stripMeta(msg));
+                        processedIndices.add(i);
                     }
-                }
+                    // Messages with tool_calls are handled when their tool results are processed
+                    break;
+
+                default:
+                    result.push(this._stripMeta(msg));
+                    processedIndices.add(i);
             }
         }
 
-        // Also track full reads AFTER last user interaction (the new exception)
-        lastAssistantWithTools = null;
-        for (let i = lastUserIndex + 1; i < messages.length; i++) {
-            const msg = messages[i];
+        return result.reverse();
+    }
 
-            if (msg.role === 'assistant' && msg.tool_calls) {
-                lastAssistantWithTools = msg;
-            }
+    /* ------------------------------------------------------------------ */
+    /*  Map builders                                                       */
+    /* ------------------------------------------------------------------ */
 
-            if (msg.role === 'tool' && msg.content && !msg.content.includes('Stale result excluded')) {
-                const lines = msg.content.split('\n');
-                if (lines.length > 0 && /^\d+\t/.test(lines[0]) && lastAssistantWithTools) {
-                    for (const tc of lastAssistantWithTools.tool_calls) {
-                        if (tc.function.name === 'read_file') {
-                            const args = JSON.parse(tc.function.arguments);
-                            const pathArg = args.path;
-                            // Only track full reads for messages after last user interaction
-                            if (!args.start_line && !args.end_line) {
-                                lastFullReadFileIndexByPath.set(pathArg, i);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Second pass: filter and build pruned list (O(N))
-        const pruned = [];
-        lastAssistantWithTools = null;
-
+    /**
+     * Build tool_call_id -> [callIndex, resultIndex] map.
+     */
+    _buildToolCallMap(messages) {
+        const toolCallMap = new Map();
         for (let i = 0; i < messages.length; i++) {
             const msg = messages[i];
-
             if (msg.role === 'assistant' && msg.tool_calls) {
-                lastAssistantWithTools = msg;
+                for (const tc of msg.tool_calls) {
+                    for (let j = i + 1; j < messages.length; j++) {
+                        if (messages[j].role === 'tool' && messages[j].tool_call_id === tc.id) {
+                            toolCallMap.set(tc.id, [i, j]);
+                            break;
+                        }
+                    }
+                }
             }
+        }
+        return toolCallMap;
+    }
 
-            if (msg.role === 'tool') {
-                if (msg.content && msg.content.includes('Stale result excluded')) {
-                    pruned.push(msg);
-                    continue;
-                }
-
-                const lines = msg.content?.split('\n') || [];
-                const isReadFileResult = lines.length > 0 && /^\d+\t/.test(lines[0]);
-
-                if (isReadFileResult && lastAssistantWithTools) {
-                    let filePath = null;
-                    let isFullRead = false;
-                    for (const tc of lastAssistantWithTools.tool_calls) {
-                        if (tc.function.name === 'read_file') {
-                            const args = JSON.parse(tc.function.arguments);
-                            filePath = args.path;
-                            isFullRead = !args.start_line && !args.end_line;
-                        }
-                    }
-
-                    // For full reads: prune if not the last full read for this file (even after last user interaction)
-                    if (isFullRead && filePath && lastFullReadFileIndexByPath.has(filePath)) {
-                        const lastIndex = lastFullReadFileIndexByPath.get(filePath);
-                        if (lastIndex !== i) {
-                            const placeholder = `Stale result excluded from context, should you need this result use tool read_stale with content_id=${i}`;
-                            pruned.push({ ...msg, content: placeholder });
-                            continue;
-                        }
-                    }
-
-                    // For partial reads: only prune before last user interaction
-                    if (!isFullRead && i <= lastUserIndex && filePath && lastReadFileIndexByPath.has(filePath)) {
-                        const lastIndex = lastReadFileIndexByPath.get(filePath);
-                        if (lastIndex !== i) {
-                            const placeholder = `Stale result excluded from context, should you need this result use tool read_stale with content_id=${i}`;
-                            pruned.push({ ...msg, content: placeholder });
-                            continue;
+    /**
+     * Build preview_id -> edit_file result index map.
+     */
+    _buildPreviewMap(messages, toolCallMap) {
+        const previewMap = new Map();
+        for (const [callIndex, resultIndex] of toolCallMap.values()) {
+            const callMsg = messages[callIndex];
+            const resultMsg = messages[resultIndex];
+            if (callMsg.tool_calls) {
+                for (const tc of callMsg.tool_calls) {
+                    if (tc.function.name === 'edit_file') {
+                        const args = this._parseArgs(tc.function.arguments);
+                        if (args.preview === true && resultMsg.content) {
+                            const match = resultMsg.content.match(/Preview \[(\w+)\]:/);
+                            if (match) {
+                                previewMap.set(match[1], resultIndex);
+                            }
                         }
                     }
                 }
-
-                if (msg.content && msg.content.includes('Preview [')) {
-                    let filePath = null;
-                    for (const tc of lastAssistantWithTools?.tool_calls || []) {
-                        if (tc.function.name === 'edit_file') {
-                            filePath = JSON.parse(tc.function.arguments).path;
-                        }
-                    }
-                    if (filePath && filesReReadAfterPreview.has(filePath)) {
-                        continue;
-                    }
-                }
-
-                if (msg._toolError) {
-                    let toolName = null;
-                    for (const tc of lastAssistantWithTools?.tool_calls || []) {
-                        toolName = tc.function.name;
-                    }
-                    if (toolName) {
-                        msg._isFailedTool = true;
-                        msg._toolName = toolName;
-                    }
-                }
-
-                pruned.push(msg);
-                continue;
             }
+        }
+        return previewMap;
+    }
 
-            if (msg.role !== 'system') {
-                pruned.push(msg);
+    /* ------------------------------------------------------------------ */
+    /*  Tool result handler                                                */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Handle a tool result message during pruning.
+     */
+    _handleToolResult(msg, resultIndex, messages, toolCallMap, previewMap, fullFilesEncountered, userMessageEncountered, result, processedIndices) {
+        const tcId = msg.tool_call_id;
+        const mapping = toolCallMap.get(tcId);
+
+        if (!mapping) return; // Orphaned tool result, skip
+
+        const [callIndex, callResultIndex] = mapping;
+        const callMsg = messages[callIndex];
+        const tc = callMsg.tool_calls?.find(tc => tc.id === tcId);
+        if (!tc) return;
+
+        const toolName = tc.function.name;
+
+        // Failed tool calls: discard both call and result
+        if (msg._toolError) {
+            processedIndices.add(callIndex);
+            processedIndices.add(callResultIndex);
+            return;
+        }
+
+        // Dispatch to tool-specific handler
+        switch (toolName) {
+            case 'read_file':
+                this._handleReadFile(msg, callMsg, tc, fullFilesEncountered, userMessageEncountered, result, processedIndices, callIndex, callResultIndex);
+                break;
+            case 'edit_file':
+                this._handleEditFile(msg, callMsg, tc, toolCallMap, previewMap, messages, fullFilesEncountered, userMessageEncountered, result, processedIndices, callIndex, callResultIndex);
+                break;
+            case 'apply_preview':
+                this._handleApplyPreview(msg, callMsg, tc, toolCallMap, previewMap, messages, fullFilesEncountered, userMessageEncountered, result, processedIndices, callIndex, callResultIndex);
+                break;
+            default:
+                this._pushCallAndResult(result, callMsg, msg, processedIndices, callIndex, callResultIndex);
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Tool-specific handlers                                             */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Handle read_file pruning:
+     * - Full reads: keep only the last one per file
+     * - Partial reads: keep only if before last user msg OR file not fully read since
+     */
+    _handleReadFile(msg, callMsg, tc, fullFilesEncountered, userMessageEncountered, result, processedIndices, callIndex, resultIndex) {
+        const args = this._parseArgs(tc.function.arguments);
+        const filePath = args.path;
+        const isFullRead = args.start_line === undefined && args.end_line === undefined;
+
+        if (isFullRead) {
+            if (fullFilesEncountered.has(filePath)) {
+                processedIndices.add(callIndex);
+                processedIndices.add(resultIndex);
+                return; // Skip duplicate full read
+            }
+            fullFilesEncountered.add(filePath);
+        } else if (userMessageEncountered && fullFilesEncountered.has(filePath)) {
+            // Partial read before last user msg, but file fully read since -> discard
+            processedIndices.add(callIndex);
+            processedIndices.add(resultIndex);
+            return;
+        }
+
+        this._pushCallAndResult(result, callMsg, msg, processedIndices, callIndex, resultIndex);
+    }
+
+    /**
+     * Handle edit_file pruning:
+     * - Previews: keep only if before last user msg AND file not fully read since
+     *     - Accepted: replace with "Edit successful.", skip apply_preview
+     *     - Rejected: replace with "Anchor mismatch"
+     * - Non-preview edits: skip if before last user msg AND file fully read since
+     */
+    _handleEditFile(msg, callMsg, tc, toolCallMap, previewMap, messages, fullFilesEncountered, userMessageEncountered, result, processedIndices, callIndex, resultIndex) {
+        const args = this._parseArgs(tc.function.arguments);
+        const filePath = args.path;
+        const isPreview = args.preview === true;
+
+        if (isPreview) {
+            if (userMessageEncountered && fullFilesEncountered.has(filePath)) {
+                // Preview pruned - check if it was accepted
+                const previewMatch = msg.content?.match(/Preview \[(\w+)\]:/);
+                const previewId = previewMatch ? previewMatch[1] : null;
+
+                let wasAccepted = false;
+                if (previewId) {
+                    for (const [pCallIdx, pResultIdx] of toolCallMap.values()) {
+                        const pCallMsg = messages[pCallIdx];
+                        if (pCallMsg.tool_calls) {
+                            for (const ptc of pCallMsg.tool_calls) {
+                                if (ptc.function.name === 'apply_preview') {
+                                    const pArgs = this._parseArgs(ptc.function.arguments);
+                                    if (pArgs.id === previewId) {
+                                        wasAccepted = true;
+                                        processedIndices.add(pCallIdx);
+                                        processedIndices.add(pResultIdx);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (wasAccepted) break;
+                    }
+                }
+
+                result.push({
+                    role: 'tool',
+                    content: wasAccepted ? 'Edit successful.' : 'Anchor mismatch',
+                    tool_call_id: tc.id
+                });
+                processedIndices.add(callIndex);
+                processedIndices.add(resultIndex);
+                return;
+            }
+            // Keep preview as-is
+            this._pushCallAndResult(result, callMsg, msg, processedIndices, callIndex, resultIndex);
+            return;
+        }
+
+        // Non-preview edit: skip if before last user msg AND file fully read since
+        if (userMessageEncountered && fullFilesEncountered.has(filePath)) {
+            const isSuccess = msg.content?.includes('Edit successful');
+            result.push({
+                role: 'tool',
+                content: isSuccess ? 'Edit successful.' : 'Edit failed.',
+                tool_call_id: tc.id
+            });
+            processedIndices.add(callIndex);
+            processedIndices.add(resultIndex);
+            return;
+        }
+
+        this._pushCallAndResult(result, callMsg, msg, processedIndices, callIndex, resultIndex);
+    }
+
+    /**
+     * Handle apply_preview pruning:
+     * - Skip if associated edit_file preview was pruned
+     * - Skip if before last user msg AND file fully read since
+     */
+    _handleApplyPreview(msg, callMsg, tc, toolCallMap, previewMap, messages, fullFilesEncountered, userMessageEncountered, result, processedIndices, callIndex, resultIndex) {
+        const args = this._parseArgs(tc.function.arguments);
+        const previewId = args.id;
+
+        const editResultIndex = previewMap.get(previewId);
+
+        // Skip if associated edit_file preview was already pruned
+        if (editResultIndex !== undefined && processedIndices.has(editResultIndex)) {
+            processedIndices.add(callIndex);
+            processedIndices.add(resultIndex);
+            return;
+        }
+
+        // Skip if before last user msg AND file fully read since
+        if (editResultIndex !== undefined && userMessageEncountered) {
+            const editCallMsg = messages[editResultIndex - 1];
+            const editTc = editCallMsg.tool_calls?.find(tc => {
+                const a = this._parseArgs(tc.function.arguments);
+                return a.preview === true;
+            });
+            if (editTc) {
+                const editArgs = this._parseArgs(editTc.function.arguments);
+                if (fullFilesEncountered.has(editArgs.path)) {
+                    processedIndices.add(callIndex);
+                    processedIndices.add(resultIndex);
+                    return;
+                }
             }
         }
 
-        // Third pass: remove failed tool results succeeded by later calls (O(N) backwards)
-        const finalPruned = [];
-        const succeededTools = new Set();
+        this._pushCallAndResult(result, callMsg, msg, processedIndices, callIndex, resultIndex);
+    }
 
-        for (let i = pruned.length - 1; i >= 0; i--) {
-            const msg = pruned[i];
+    /* ------------------------------------------------------------------ */
+    /*  Utility helpers                                                    */
+    /* ------------------------------------------------------------------ */
 
-            if (msg.role === 'assistant' && msg.tool_calls) {
-                finalPruned.push(msg);
-            } else if (msg.role === 'tool') {
-                if (msg._isFailedTool && succeededTools.has(msg._toolName)) {
-                    continue; // Skip failed result, covered by later success
-                }
-                finalPruned.push(msg);
-                if (!msg._isFailedTool) {
-                    succeededTools.add(msg._toolName);
-                }
-            } else {
-                // User or system message resets tool success tracking
-                succeededTools.clear();
-                finalPruned.push(msg);
-            }
+    /**
+     * Push stripped call and result to the result array, marking indices as processed.
+     */
+    _pushCallAndResult(result, callMsg, toolMsg, processedIndices, callIndex, resultIndex) {
+        result.push(this._stripMeta(toolMsg));
+        result.push(this._stripMeta(callMsg));
+        processedIndices.add(callIndex);
+        processedIndices.add(resultIndex);
+    }
+
+    /**
+     * Parse JSON arguments from a tool call, safely handling invalid JSON.
+     */
+    _parseArgs(argsStr) {
+        try {
+            return JSON.parse(argsStr);
+        } catch {
+            return {};
         }
+    }
 
-        finalPruned.reverse();
-
-        return finalPruned;
+    /**
+     * Strip internal metadata from a message for API transmission.
+     */
+    _stripMeta(msg) {
+        const stripped = { role: msg.role, content: msg.content };
+        if (msg.reasoning_content) stripped.reasoning_content = msg.reasoning_content;
+        if (msg.tool_calls) stripped.tool_calls = msg.tool_calls;
+        if (msg.tool_call_id) stripped.tool_call_id = msg.tool_call_id;
+        return stripped;
     }
 
     async load() {
@@ -247,10 +379,10 @@ export class MessageContext {
     /**
      * Get statistics about the current context.
      */
-    getStatistics(livepruneEnabled) {
-        const messages = this.messages;
+    getStatistics(systemPrompt) {
+        const messages = this.prepared(systemPrompt, false);
         const fullCount = messages.length;
-        const prunedMessages = this.prepared(livepruneEnabled);
+        const prunedMessages = this.prepared(systemPrompt, true);
         const prunedCount = prunedMessages.length;
         const removedCount = fullCount - prunedCount;
 

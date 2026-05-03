@@ -182,18 +182,6 @@ export class Tool {
                     required: ['text']
                 }
             }
-        },
-        {
-            type: 'function',
-            function: {
-                name: 'read_stale',
-                description: 'Retrieve a stale result that was excluded from context. Use this when you need content that was pruned from the conversation.',
-                parameters: {
-                    type: 'object',
-                    properties: { content_id: { type: 'integer', description: 'The index of the context entry to retrieve' } },
-                    required: ['content_id']
-                }
-            }
         }
     ];
 
@@ -575,24 +563,6 @@ export class Tool {
         return text;
     }
 
-    read_stale({ content_id }) {
-        if (content_id === undefined || content_id === null) {
-            throw new ToolError('content_id is required.');
-        }
-        const id = parseInt(content_id, 10);
-        if (isNaN(id)) {
-            throw new ToolError(`content_id must be an integer, got ${JSON.stringify(content_id)}.`);
-        }
-        if (id < 0) {
-            throw new ToolError(`content_id must be >= 0, got ${id}.`);
-        }
-        const messages = this.application.context.messages;
-        if (!messages || !messages[id]) {
-            throw new ToolError(`No stale result found at index ${id}.`);
-        }
-        return messages[id].content;
-    }
-
     // --- Helper functions ---
 
     /**
@@ -830,7 +800,7 @@ export class Tool {
                 case 'list_files': return { result: await this.list_files(args), error: false, toolName: name };
                 case 'read_file': return { result: await this.read_file(args), error: false, toolName: name };
                 case 'create_file': return { result: await this.create_file(args), error: false, toolName: name };
-                case 'edit_file': return { result: dump(await this.edit_file(args)), error: false, toolName: name };
+                case 'edit_file': return { result: await this.edit_file(args), error: false, toolName: name };
                 case 'apply_preview': return { result: await this.apply_preview(args), error: false, toolName: name };
                 case 'undo': return { result: await this.undo(), error: false, toolName: name };
                 case 'search_files': return { result: await this.search_files(args), error: false, toolName: name };

@@ -73,7 +73,7 @@ export class Command {
     }
 
     async context() {
-        const stats = this.application.context.getStatistics(this.application.liveprune);
+        const stats = this.application.context.getStatistics(this.application.constructor.SYSTEM_PROMPT);
 
         let output = `📊 Context Statistics:\n\n`;
         output += `  Messages: ${stats.fullCount} (full) → ${stats.prunedCount} (pruned) | Removed: ${stats.removedCount}\n`;
@@ -99,11 +99,7 @@ export class Command {
     }
 
     async reset() {
-        // Keep only the system prompt (first message)
-        while (this.application.context.messages.length > 1) {
-            this.application.context.pop();
-        }
-        await this.application.context.save();
+        this.application.context.reset();
         return '✅ Context cleared.';
     }
 
