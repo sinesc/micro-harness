@@ -734,9 +734,17 @@ export class Tool {
         const tmpFile = path.join(path.dirname(filePath), `.tmp_syntax_check_${Date.now()}.js`);
         try {
             await fs.writeFile(tmpFile, content, 'utf-8');
-            const result = await execAsync(`acorn --module --ecma2024 --silent "${tmpFile}"`);
-            const stderr = result.stderr;
-            if (stderr) return stderr.trim();
+            let stderr;
+            try {
+                let result = await execAsync(`acorn --module --ecma2024 --silent "${tmpFile}"`);
+                stderr = result.stderr;
+            } catch (e) {
+                if (e.stderr === undefined) {
+                    throw new Error('Failed to run external syntax check command');
+                }
+                stderr = e.stderr;
+            }
+            if (stderr) return stderr.replace(tmpFile, 'temp_file').trim();
             return null;
         } finally {
             try {
