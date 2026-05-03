@@ -428,9 +428,17 @@ export class Tool {
             const newLinesForApply = [...newLines];
             if (startTrimFixed) newLinesForApply[0] = lines[startIdx];
             if (endTrimFixed) newLinesForApply[newLinesForApply.length - 1] = lines[endIdx];
-            const reason = (startError || endError)
+            let reason = (startError || endError)
                 ? 'One anchor matched but the other did not — check this preview for unintentionally duplicated/removed lines.'
                 : null;
+            const fullContentLines = [...lines.slice(0, startIdx), ...newLinesForApply, ...lines.slice(endIdx + 1)];
+            const fullContent = fullContentLines.join('\n');
+            const syntaxError = await this.#check_file(fullContent, resolvedPath);
+            if (syntaxError) {
+                reason = reason ? reason + '\n\n' : '';
+                reason += `Syntax error in the requested edit: ${syntaxError}`;
+            }
+
             return this.#generatePreviewResponse(
                 filePath, fileContent, currentChecksum, lines, offsetMap,
                 startIdx, endIdx, newLinesForApply, startLine, endLine + endDelta, reason
@@ -727,6 +735,7 @@ export class Tool {
     }
 
     async #check_file(content, filePath) {
+        console.log(content);
         const isJSFile = filePath.endsWith('.js');
         if (!isJSFile) return null;
 
@@ -772,7 +781,7 @@ export class Tool {
                 case 'list_files': return { result: await this.list_files(args), error: false, toolName: name };
                 case 'read_file': return { result: await this.read_file(args), error: false, toolName: name };
                 case 'create_file': return { result: await this.create_file(args), error: false, toolName: name };
-                case 'edit_file': return { result: await this.edit_file(args), error: false, toolName: name };
+                case 'edit_file': return { result: dump(await this.edit_file(args)), error: false, toolName: name };
                 case 'apply_preview': return { result: await this.apply_preview(args), error: false, toolName: name };
                 case 'undo': return { result: await this.undo(), error: false, toolName: name };
                 case 'search_files': return { result: await this.search_files(args), error: false, toolName: name };
