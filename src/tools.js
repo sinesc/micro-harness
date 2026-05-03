@@ -538,7 +538,7 @@ export class Tool {
         if (id < 0) {
             throw new ToolError(`content_id must be >= 0, got ${id}.`);
         }
-        const messages = this.application.messages;
+        const messages = this.application.context.messages;
         if (!messages || !messages[id]) {
             throw new ToolError(`No stale result found at index ${id}.`);
         }

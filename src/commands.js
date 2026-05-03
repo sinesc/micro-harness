@@ -24,7 +24,7 @@ export class Command {
     }
 
     async exit() {
-        await this.application.saveContext(this.application.messages);
+        await this.application.context.save();
     }
 
     async models() {
@@ -77,71 +77,25 @@ export class Command {
     }
 
     async context() {
-        const messages = this.application.messages;
-        const fullCount = messages.length;
-        const prunedMessages = this.application.pruneContextForAPI(messages);
-        const prunedCount = prunedMessages.length;
-        const removedCount = fullCount - prunedCount;
-
-        // Count read_file results (unique files)
-        const readFiles = new Set();
-        for (const msg of messages) {
-            if (msg.role === 'tool' && msg.content !== null && msg.content !== undefined) {
-                // Find the corresponding tool call
-                for (let j = messages.indexOf(msg) - 1; j >= 0; j--) {
-                    if (messages[j].role === 'assistant' && messages[j].tool_calls) {
-                        for (const tc of messages[j].tool_calls) {
-                            if (tc.id === msg.tool_call_id && tc.function.name === 'read_file') {
-                                const args = JSON.parse(tc.function.arguments);
-                                if (args && args.path) {
-                                    readFiles.add(args.path);
-                                }
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Count tool calls by type
-        const toolCallCounts = {};
-        for (const msg of messages) {
-            if (msg.role === 'assistant' && msg.tool_calls) {
-                for (const tc of msg.tool_calls) {
-                    toolCallCounts[tc.function.name] = (toolCallCounts[tc.function.name] || 0) + 1;
-                }
-            }
-        }
-
-        // Count roles
-        const roleCounts = {};
-        for (const msg of messages) {
-            roleCounts[msg.role] = (roleCounts[msg.role] || 0) + 1;
-        }
-
-        // Estimate token counts
-        const fullTokens = messages.reduce((sum, msg) => sum + (msg.content || '').length / 4, 0);
-        const prunedTokens = prunedMessages.reduce((sum, msg) => sum + (msg.content || '').length / 4, 0);
+        const stats = this.application.context.getStatistics(this.livepruneEnabled);
 
         let output = `📊 Context Statistics:\n\n`;
-        output += `  Messages: ${fullCount} (full) → ${prunedCount} (pruned) | Removed: ${removedCount}\n`;
-        output += `  Estimated tokens: ${Math.round(fullTokens)} (full) → ${Math.round(prunedTokens)} (pruned)\n\n`;
+        output += `  Messages: ${stats.fullCount} (full) → ${stats.prunedCount} (pruned) | Removed: ${stats.removedCount}\n`;
+        output += `  Estimated tokens: ${Math.round(stats.fullTokens)} (full) → ${Math.round(stats.prunedTokens)} (pruned)\n\n`;
 
         output += `  Role breakdown:\n`;
-        for (const [role, count] of Object.entries(roleCounts).sort((a, b) => b[1] - a[1])) {
+        for (const [role, count] of Object.entries(stats.roleCounts).sort((a, b) => b[1] - a[1])) {
             const icon = { system: '🤖', user: '👤', assistant: '🤖', tool: '🔧' }[role] || role;
             output += `    ${icon} ${role}: ${count}\n`;
         }
 
-        output += `\n  Files read: ${readFiles.size}\n`;
-        if (readFiles.size > 0) {
-            output += `    ${[...readFiles].join(', ')}\n`;
+        output += `\n  Files read: ${stats.readFiles.length}\n`;
+        if (stats.readFiles.length > 0) {
+            output += `    ${stats.readFiles.join(', ')}\n`;
         }
 
         output += `\n  Tool calls by type:\n`;
-        for (const [tool, count] of Object.entries(toolCallCounts).sort((a, b) => b[1] - a[1])) {
+        for (const [tool, count] of Object.entries(stats.toolCallCounts).sort((a, b) => b[1] - a[1])) {
             output += `    ${tool}: ${count}\n`;
         }
 
@@ -150,10 +104,10 @@ export class Command {
 
     async reset() {
         // Keep only the system prompt (first message)
-        while (this.application.messages.length > 1) {
-            this.application.messages.pop();
+        while (this.application.context.messages.length > 1) {
+            this.application.context.pop();
         }
-        await this.application.saveContext(this.application.messages);
+        await this.application.context.save();
         return '✅ Context cleared.';
     }
 
