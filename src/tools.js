@@ -728,27 +728,27 @@ export class Tool {
         const dump = (v) => { console.log(v); return v; };
         try {
             switch (name) {
-                case 'list_files': return { result: await this.list_files(args), error: null, toolName: name };
-                case 'read_file': return { result: await this.read_file(args), error: null, toolName: name };
-                case 'create_file': return { result: await this.create_file(args), error: null, toolName: name };
-                case 'edit_file': return { result: await this.edit_file(args), error: null, toolName: name };
-                case 'apply_preview': return { result: await this.apply_preview(args), error: null, toolName: name };
-                case 'undo': return { result: await this.undo(), error: null, toolName: name };
-                case 'search_files': return { result: await this.search_files(args), error: null, toolName: name };
-                case 'syntax_check': return { result: await this.syntax_check(args), error: null, toolName: name };
-                case 'calc': return { result: this.calc(args), error: null, toolName: name };
-                case 'todo': return { result: this.todo(args), error: null, toolName: name };
-                case 'read_stale': return { result: this.read_stale(args), error: null, toolName: name };
-                default: return { result: `Unknown tool: ${name}`, error: null, toolName: name };
+                case 'list_files': return { result: await this.list_files(args), error: false, toolName: name };
+                case 'read_file': return { result: await this.read_file(args), error: false, toolName: name };
+                case 'create_file': return { result: await this.create_file(args), error: false, toolName: name };
+                case 'edit_file': return { result: await this.edit_file(args), error: false, toolName: name };
+                case 'apply_preview': return { result: await this.apply_preview(args), error: false, toolName: name };
+                case 'undo': return { result: await this.undo(), error: false, toolName: name };
+                case 'search_files': return { result: await this.search_files(args), error: false, toolName: name };
+                case 'syntax_check': return { result: await this.syntax_check(args), error: false, toolName: name };
+                case 'calc': return { result: this.calc(args), error: false, toolName: name };
+                case 'todo': return { result: this.todo(args), error: false, toolName: name };
+                case 'read_stale': return { result: this.read_stale(args), error: false, toolName: name };
+                default: return { result: `Unknown tool: ${name}`, error: true, toolName: name };
             }
         } catch (err) {
             if (err instanceof ToolError) {
                 const call = JSON.stringify({ name, args });
                 if (call === this.lastErrorCall) {
-                    return { result: "Identical tool call detected. Read the previous error message carefully, analyse the problem and make a correct tool call.", error: null, toolName: name };
+                    return { result: "Identical tool call detected. Read the previous error message carefully, analyse the problem and make a correct tool call.", error: true, toolName: name };
                 }
                 this.lastErrorCall = call;
-                return { result: err.message, error: err.message, toolName: name };
+                return { result: err.message, error: true, toolName: name };
             }
             throw err;
         }

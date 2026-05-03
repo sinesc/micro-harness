@@ -72,8 +72,8 @@ export class Command {
     }
 
     async tool(toolName, args) {
-        const result = await this.application.tool.exec(toolName, args);
-        return `🔧 ${toolName} output:\n${result}`;
+        const { result, error } = await this.application.tool.exec(toolName, args);
+        return `🔧 ${toolName} ${error?"error: ":"result:\n"}${result}`;
     }
 
     async context() {
@@ -173,9 +173,9 @@ export class Command {
                     throw new CommandError('Tool name is required. Usage: /tool <name> <json args>');
                 }
                 const [name, ...rest] = args.split(' ');
-                const jsonStr = rest.join(' ');
+                const jsonStr = rest.join(' ').trim();
                 try {
-                    const parsedArgs = JSON.parse(jsonStr);
+                    const parsedArgs = JSON.parse(jsonStr.slice(0, 1) === '{' ? jsonStr : `{${jsonStr}}`);
                     return await this.tool(name, parsedArgs);
                 } catch (err) {
                     throw new CommandError(`Failed to parse tool arguments: ${err.message}`);
