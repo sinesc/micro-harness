@@ -38,6 +38,7 @@ export class MessageContext {
         }
 
         const lastReadFileIndexByPath = new Map();
+        const lastFullReadFileIndexByPath = new Map();
         const filesReReadAfterPreview = new Set();
         let lastAssistantWithTools = null;
 
@@ -49,7 +50,8 @@ export class MessageContext {
                 lastAssistantWithTools = msg;
                 for (const tc of msg.tool_calls) {
                     if (tc.function.name === 'read_file') {
-                        const pathArg = JSON.parse(tc.function.arguments).path;
+                        const args = JSON.parse(tc.function.arguments);
+                        const pathArg = args.path;
                         filesReReadAfterPreview.add(pathArg);
                         lastReadFileIndexByPath.delete(pathArg);
                     }
@@ -61,8 +63,39 @@ export class MessageContext {
                 if (lines.length > 0 && /^\d+\t/.test(lines[0]) && lastAssistantWithTools) {
                     for (const tc of lastAssistantWithTools.tool_calls) {
                         if (tc.function.name === 'read_file') {
-                            const pathArg = JSON.parse(tc.function.arguments).path;
+                            const args = JSON.parse(tc.function.arguments);
+                            const pathArg = args.path;
                             lastReadFileIndexByPath.set(pathArg, i);
+                            // Track full reads (no start_line/end_line) separately
+                            if (!args.start_line && !args.end_line) {
+                                lastFullReadFileIndexByPath.set(pathArg, i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also track full reads AFTER last user interaction (the new exception)
+        lastAssistantWithTools = null;
+        for (let i = lastUserIndex + 1; i < messages.length; i++) {
+            const msg = messages[i];
+
+            if (msg.role === 'assistant' && msg.tool_calls) {
+                lastAssistantWithTools = msg;
+            }
+
+            if (msg.role === 'tool' && msg.content && !msg.content.includes('Stale result excluded')) {
+                const lines = msg.content.split('\n');
+                if (lines.length > 0 && /^\d+\t/.test(lines[0]) && lastAssistantWithTools) {
+                    for (const tc of lastAssistantWithTools.tool_calls) {
+                        if (tc.function.name === 'read_file') {
+                            const args = JSON.parse(tc.function.arguments);
+                            const pathArg = args.path;
+                            // Only track full reads for messages after last user interaction
+                            if (!args.start_line && !args.end_line) {
+                                lastFullReadFileIndexByPath.set(pathArg, i);
+                            }
                         }
                     }
                 }
@@ -73,7 +106,7 @@ export class MessageContext {
         const pruned = [];
         lastAssistantWithTools = null;
 
-        for (let i = 0; i <= lastUserIndex; i++) {
+        for (let i = 0; i < messages.length; i++) {
             const msg = messages[i];
 
             if (msg.role === 'assistant' && msg.tool_calls) {
@@ -91,13 +124,27 @@ export class MessageContext {
 
                 if (isReadFileResult && lastAssistantWithTools) {
                     let filePath = null;
+                    let isFullRead = false;
                     for (const tc of lastAssistantWithTools.tool_calls) {
                         if (tc.function.name === 'read_file') {
-                            filePath = JSON.parse(tc.function.arguments).path;
+                            const args = JSON.parse(tc.function.arguments);
+                            filePath = args.path;
+                            isFullRead = !args.start_line && !args.end_line;
                         }
                     }
 
-                    if (filePath && lastReadFileIndexByPath.has(filePath)) {
+                    // For full reads: prune if not the last full read for this file (even after last user interaction)
+                    if (isFullRead && filePath && lastFullReadFileIndexByPath.has(filePath)) {
+                        const lastIndex = lastFullReadFileIndexByPath.get(filePath);
+                        if (lastIndex !== i) {
+                            const placeholder = `Stale result excluded from context, should you need this result use tool read_stale with content_id=${i}`;
+                            pruned.push({ ...msg, content: placeholder });
+                            continue;
+                        }
+                    }
+
+                    // For partial reads: only prune before last user interaction
+                    if (!isFullRead && i <= lastUserIndex && filePath && lastReadFileIndexByPath.has(filePath)) {
                         const lastIndex = lastReadFileIndexByPath.get(filePath);
                         if (lastIndex !== i) {
                             const placeholder = `Stale result excluded from context, should you need this result use tool read_stale with content_id=${i}`;
@@ -137,11 +184,6 @@ export class MessageContext {
             if (msg.role !== 'system') {
                 pruned.push(msg);
             }
-        }
-
-        // Append current turn messages unchanged
-        for (let i = lastUserIndex + 1; i < messages.length; i++) {
-            pruned.push(messages[i]);
         }
 
         // Third pass: remove failed tool results succeeded by later calls (O(N) backwards)
