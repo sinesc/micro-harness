@@ -250,7 +250,9 @@ export class Tool {
         // Restore the checksum
         this.fileChecksums.set(filePath, this.#computeChecksum(content));
 
-        return `Undid the last edit on ${filePath}.`;
+        // Convert absolute path to relative path for the return message
+        const relativePath = path.relative(process.cwd(), filePath);
+        return `Undid the last edit on ${relativePath}.`;
     }
 
     async search_files({ pattern, dir = '.', file_pattern = null, max_results = 50 }) {
@@ -735,7 +737,6 @@ export class Tool {
     }
 
     async #check_file(content, filePath) {
-        console.log(content);
         const isJSFile = filePath.endsWith('.js');
         if (!isJSFile) return null;
 
