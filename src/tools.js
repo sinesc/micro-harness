@@ -371,7 +371,6 @@ export class Tool {
         const atBoundary = actualStart === 1 || actualEnd === lines.length;
 
         if (newLines.length < 2 && !atBoundary) {
-            console.log(atBoundary, actualStart, actualEnd, newLines.length, lines.length);
             throw new ToolError(`Replacement MUST contain at least two lines: the top anchor line, optionally a replacement (omit to delete), the bottom anchor line.`);
         }
 
@@ -454,7 +453,7 @@ export class Tool {
         const newContent = lines.join('\n');
         const syntaxError = await this.#check_file(newContent, resolvedPath);
         if (syntaxError) {
-            const reason = `Syntax error in the requested edit:\n${syntaxError}\nReview the changes and adjust your edit.`;
+            const reason = `Syntax error in the requested edit: ${syntaxError}`;
             return this.#generatePreviewResponse(
                 filePath, fileContent, currentChecksum, lines, offsetMap,
                 startIdx, endIdx, newLines, startLine, endLine + endDelta, reason
@@ -616,10 +615,10 @@ export class Tool {
 
         // Context before
         for (let i = Math.max(0, startIdx - CONTEXT); i < startIdx; i++)
-            output.push(`  ${i + 1} │ ${lines[i]}`);
+            output.push(`${i + 1}\t${lines[i]}`);
 
         // Removed lines (old content)
-        const removedCount = endIdx - startIdx + 1;
+        /*const removedCount = endIdx - startIdx + 1;
         if (removedCount <= MAX_CHANGED) {
             for (let i = startIdx; i <= endIdx; i++)
                 output.push(`- ${i + 1} │ ${lines[i]}`);
@@ -629,25 +628,25 @@ export class Tool {
             output.push(`- ... (${removedCount - MAX_CHANGED} more lines)`);
             for (let i = endIdx - half + 1; i <= endIdx; i++)
                 output.push(`- ${i + 1} │ ${lines[i]}`);
-        }
+        }*/
 
         // Added lines (new content)
         if (newLines.length <= MAX_CHANGED) {
             for (const l of newLines)
-                output.push(`+    │ ${l}`);
+                output.push(`+\t${l}`);
         } else {
             for (let i = 0; i < half; i++)
-                output.push(`+    │ ${newLines[i]}`);
+                output.push(`+\t${newLines[i]}`);
             output.push(`+ ... (${newLines.length - MAX_CHANGED} more lines)`);
             for (let i = newLines.length - half; i < newLines.length; i++)
-                output.push(`+    │ ${newLines[i]}`);
+                output.push(`+\t${newLines[i]}`);
         }
 
         // Context after
         for (let i = endIdx + 1; i <= Math.min(lines.length - 1, endIdx + CONTEXT); i++)
-            output.push(`  ${i + 1} │ ${lines[i]}`);
+            output.push(`${i + 1}\t${lines[i]}`);
 
-        output.push(`\nCall apply_preview {"id":"${id}"} to apply.`);
+        output.push(`\nRetry your edit if this is not correct, otherwise call apply_preview {"id":"${id}"} to apply.`);
         return output.join('\n');
     }
 
