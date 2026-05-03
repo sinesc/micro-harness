@@ -1,6 +1,6 @@
 import readline from 'readline';
-import { Tool } from './tools.js';
-import { Command } from './commands.js';
+import { Tool } from './tool.js';
+import { Command } from './command.js';
 import { MessageContext } from './message-context.js';
 
 export class Application {
