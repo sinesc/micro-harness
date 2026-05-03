@@ -225,7 +225,7 @@ export class Tool {
         try {
             await fs.writeFile(resolvedPath, content, 'utf-8');
             this.fileChecksums.set(resolvedPath, this.#computeChecksum(content));  // Set initial checksum
-            return `Created file ${resolvedPath} with ${content.split(/\r?\n/).length} line(s).`;
+            return `Created file ${filePath} with ${content.split(/\r?\n/).length} line(s).`;
         } catch (err) {
             throw new ToolError(`Cannot create file '${filePath}': ${err.message}`);
         }
@@ -324,25 +324,22 @@ export class Tool {
         if (typeof replacement !== 'string')
             throw new ToolError(`'replacement' must be a string.`);
 
-        const resolvedPath = this._resolvePath(filePath);
-
         const startLine = parseInt(start_line, 10);
         const endLine = parseInt(end_line, 10);
 
         if (isNaN(startLine))
-            throw new ToolError(`'start_line' must be an integer, got ${JSON.stringify(start_line)}.`);
+            throw new ToolError(`'start_line' must be an integer.`);
         if (isNaN(endLine))
-            throw new ToolError(`'end_line' must be an integer, got ${JSON.stringify(end_line)}.`);
+            throw new ToolError(`'end_line' must be an integer.`);
         if (startLine < 1)
-            throw new ToolError(`'start_line' must be >= 1, got ${startLine}.`);
+            throw new ToolError(`'start_line' must be >= 1.`);
         if (endLine < 1)
-            throw new ToolError(`'end_line' must be >= 1, got ${endLine}.`);
-        if (startLine === endLine)
-            throw new ToolError(`'end_line' must always be greater than 'start_line' since the first and last line of your edit are REQUIRED to be unmodified anchor lines. If you were trying to edit a single line, include the line above and below it in your edit.`);
+            throw new ToolError(`'end_line' must be >= 1.`);
         if (startLine > endLine)
-            throw new ToolError(`'start_line' must not exceed 'end_line'.`);
+            throw new ToolError(`'end_line' must be greater than 'start_line'.`);
 
         // --- File read and checksum ---
+        const resolvedPath = this._resolvePath(filePath);
         const fileContent = await fs.readFile(resolvedPath, 'utf-8');
 
         const previousChecksum = this.fileChecksums.get(resolvedPath);
@@ -369,8 +366,19 @@ export class Tool {
 
         // Strip one trailing newline before splitting so that a line-terminated
         // replacement ("foo\n") is treated as one line, not two.
-        const newLines = replacement === '' ? [] : replacement.replace(/\r?\n$/, '').split(/\r?\n/);
+        const newLines = replacement === '' ? [] : replacement.replace(/\r?\n$/, '').split(/\r?\n/); // TODO needs model response testing
 
+        const atBoundary = actualStart === 1 || actualEnd === lines.length;
+
+        if (newLines.length < 2 && !atBoundary) {
+            console.log(atBoundary, actualStart, actualEnd, newLines.length, lines.length);
+            throw new ToolError(`Your replacement MUST contain at least two lines: the top anchor line, optionally a replacement (omit to delete), the bottom anchor line.`);
+        }
+
+        if (actualEnd - actualStart < 1 && !atBoundary) {
+            throw new ToolError(`'end_line' must always be greater than 'start_line' since the first and last line of your edit are REQUIRED to be unmodified anchor lines. If you were trying to edit a single line, include the line above and below it in your edit.`);
+        }
+        
         // Anchor validation: the first/last lines of replacement must match the
         // file at start_line/end_line to prevent silently dropping content.
         // Anchors are waived at file boundaries.  Resolution priority per anchor:
@@ -492,7 +500,7 @@ export class Tool {
         if (stderr) {
             throw new ToolError(stderr.trim());
         }
-        return `Syntax check passed for ${resolvedPath}.`;
+        return `Syntax check passed for ${filePath}.`;
     }
 
     calc({ expression }) {
