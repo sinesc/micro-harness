@@ -50,7 +50,11 @@ export class Tool {
                 description: 'Read file contents. The output includes authoritative line numbers followed by a tab character followed by the line content.',
                 parameters: {
                     type: 'object',
-                    properties: { path: { type: 'string', description: 'File path' } },
+                    properties: {
+                        path: { type: 'string', description: 'File path' },
+                        start_line: { type: 'integer', description: 'Starting line number (1-indexed). If omitted, reads from the beginning.' },
+                        end_line: { type: 'integer', description: 'Ending line number (1-indexed). If omitted, reads to the end.' }
+                    },
                     required: ['path']
                 }
             }
@@ -203,7 +207,7 @@ export class Tool {
         }
     }
 
-    async read_file({ path: filePath }) {
+    async read_file({ path: filePath, start_line, end_line }) {
         const resolvedPath = this._resolvePath(filePath);
         try {
             const content = await fs.readFile(resolvedPath, 'utf-8');
@@ -213,9 +217,53 @@ export class Tool {
             }
             this.fileChecksums.set(resolvedPath, this.#computeChecksum(content));
             this.filesDirtyAfterRead.delete(resolvedPath);
-            let line = 1;
-            return content.split(/\r?\n/).map((text, index) => `${index+1}\t${text}`).join("\n");
+            
+            const lines = content.split(/\r?\n/);
+            const totalLines = lines.length;
+            
+            // Parse and validate line range
+            let startIdx = 0; // 0-indexed
+            let endIdx = totalLines - 1; // 0-indexed
+            
+            if (start_line !== undefined && start_line !== null) {
+                const startLineNum = parseInt(start_line, 10);
+                if (isNaN(startLineNum)) {
+                    throw new ToolError(`'start_line' must be an integer.`);
+                }
+                if (startLineNum < 1) {
+                    throw new ToolError(`'start_line' must be >= 1.`);
+                }
+                if (startLineNum > totalLines) {
+                    throw new ToolError(`'start_line' ${startLineNum} exceeds total lines ${totalLines}.`);
+                }
+                startIdx = startLineNum - 1; // Convert to 0-indexed
+            }
+            
+            if (end_line !== undefined && end_line !== null) {
+                const endLineNum = parseInt(end_line, 10);
+                if (isNaN(endLineNum)) {
+                    throw new ToolError(`'end_line' must be an integer.`);
+                }
+                if (endLineNum < 1) {
+                    throw new ToolError(`'end_line' must be >= 1.`);
+                }
+                if (endLineNum > totalLines) {
+                    throw new ToolError(`'end_line' ${endLineNum} exceeds total lines ${totalLines}.`);
+                }
+                endIdx = endLineNum - 1; // Convert to 0-indexed
+            }
+            
+            if (startIdx > endIdx) {
+                throw new ToolError(`'end_line' must be greater than or equal to 'start_line'.`);
+            }
+            
+            // Extract the requested range
+            const selectedLines = lines.slice(startIdx, endIdx + 1);
+            return selectedLines.map((text, index) => `${startIdx + index + 1}\t${text}`).join("\n");
         } catch (err) {
+            if (err instanceof ToolError) {
+                throw err;
+            }
             throw new ToolError(`Cannot read file '${filePath}': ${err.message}`);
         }
     }
