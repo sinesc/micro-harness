@@ -374,8 +374,7 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
                                 Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 16 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
                             );
                             const structuredResult = await this.tool.exec(tc.function.name, args);
-                            const isFailed = structuredResult.error !== undefined && structuredResult.error !== null;
-                            this.displayMessage('tool', `${tc.function.name}${JSON.stringify(abbreviatedArgs)}`, isFailed ? 'red' : 'grey');
+                            this.displayMessage('tool', `${tc.function.name} ${JSON.stringify(abbreviatedArgs).slice(1, -1)}`, structuredResult.error ? 'red' : 'grey');
                             this.messages.push({ role: 'assistant', content: null, tool_calls: [tc] });
                             // Store structured result error as metadata for live-pruning
                             this.messages.push({ role: 'tool', tool_call_id: tc.id, content: structuredResult.result, _toolError: structuredResult.error });
