@@ -56,7 +56,7 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
 
         // Instantiate Tool
         this.tool = new Tool(this);
-        this.liveprune = false;
+        this.liveprune = true;
 
         // Instantiate Command
         this.command = new Command(this);
@@ -77,6 +77,59 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
         });
         if (!res.ok) throw new Error(`LM Studio API error: ${res.status} ${res.statusText}`);
         return res.json();
+    }
+
+    async *fetchCompletionStream(messages) {
+        const res = await fetch(`${this.lmStudioUrl}/v1/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: this.currentModel,
+                messages,
+                tools: Tool.TOOLS,
+                tool_choice: 'auto',
+                temperature: 0.6,
+                stream: true
+            })
+        });
+        if (!res.ok) throw new Error(`LM Studio API error: ${res.status} ${res.statusText}`);
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+
+                // Parse SSE lines from buffer
+                const lines = buffer.split('\n');
+                buffer = lines.pop(); // Keep incomplete last line in buffer
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (trimmed === '' || trimmed === 'data: [DONE]') continue;
+                    if (!trimmed.startsWith('data: ')) continue;
+
+                    const data = JSON.parse(trimmed.slice(6));
+                    yield data;
+                }
+            }
+
+            // Process any remaining buffer
+            if (buffer.trim() && buffer.trim() !== 'data: [DONE]') {
+                const trimmed = buffer.trim();
+                if (trimmed.startsWith('data: ')) {
+                    const data = JSON.parse(trimmed.slice(6));
+                    yield data;
+                }
+            }
+        } finally {
+            reader.releaseLock();
+        }
     }
 
     displayTokenUsage() {
@@ -109,6 +162,55 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
         }
         console.log(`${typeLabel} ${colorCode}${content}${resetCode}`);
         this.lastMessageType = role;
+    }
+
+    /**
+     * Display a streaming chunk progressively.
+     * Uses \r to update the current line in-place, flushing on newlines.
+     * Returns the accumulated content built from all chunks.
+     */
+    displayMessageChunk(role, chunk, isFirst, isLast, color = null) {
+        if (!chunk || chunk.length === 0) return;
+
+        const typeLabel = {
+            system: '🤖',
+            user: '👤',
+            assistant: '🤖',
+            tool: '🔧'
+        }[role] || role;
+
+        let colorCode = '';
+        if (color === 'grey') colorCode = '\x1b[90m';
+        else if (color === 'red') colorCode = '\x1b[91m';
+        const resetCode = '\x1b[0m';
+
+        // On first chunk, print the type label prefix
+        if (isFirst) {
+            if (this.lastMessageType !== null && this.lastMessageType !== role) {
+                process.stdout.write('\n');
+            }
+            process.stdout.write(`${typeLabel} ${colorCode}`);
+            this.lastMessageType = role;
+        }
+
+        // Split chunk by newlines for progressive display
+        const parts = chunk.split('\n');
+        for (let i = 0; i < parts.length; i++) {
+            const part = parts[i];
+            if (i < parts.length - 1) {
+                // Not the last part: print with newline and reset
+                process.stdout.write(`${part}${resetCode}\n${colorCode}`);
+            } else if (isLast) {
+                // Final part of final chunk: commit with newline and reset
+                process.stdout.write(`${part}${resetCode}\n`);
+            } else {
+                // Last part but not final chunk: use \r for in-place update
+                // Clear to end of line first, then rewrite
+                process.stdout.write('\x1b[K');
+                process.stdout.write(part);
+            }
+        }
+        process.stdout.flush?.();
     }
 
     async run() {
@@ -155,19 +257,97 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
                 try {
                     // Prune context before sending to API if liveprune is enabled
                     const messagesToSend = this.context.prepared(this.liveprune);
-                    const response = await this.fetchCompletion(messagesToSend);
 
-                    // Track token usage
-                    if (response.usage) {
-                        this.totalPromptTokens = response.usage.prompt_tokens || 0;
-                        this.totalCompletionTokens = response.usage.completion_tokens || 0;
-                        this.totalTokens = response.usage.total_tokens || 0;
+                    // Accumulators for streaming response
+                    let streamedContent = '';
+                    let streamedReasoning = '';
+                    const streamedToolCalls = new Map(); // index -> { id, function: { name, arguments } }
+                    let hasToolCalls = false;
+                    let streamComplete = false;
+                    let firstContentChunk = true;
+                    let bufferedLeadingContent = '';
+
+                    // Stream the response and display progressively
+                    for await (const chunk of this.fetchCompletionStream(messagesToSend)) {
+                        const delta = chunk.choices?.[0]?.delta;
+                        if (!delta) continue;
+
+                        // Accumulate content
+                        if (delta.content) {
+                            streamedContent += delta.content;
+                            if (firstContentChunk) {
+                                bufferedLeadingContent += delta.content;
+                                const trimmedStart = bufferedLeadingContent.trimStart();
+                                if (trimmedStart.length > 0) {
+                                    this.displayMessageChunk('assistant', trimmedStart, true, false);
+                            firstContentChunk = false;
+                                    bufferedLeadingContent = '';
+                                }
+                            } else {
+                                this.displayMessageChunk('assistant', delta.content, false, false);
+                            }
+                        }
+
+                        // Accumulate reasoning content
+                        if (delta.reasoning_content) {
+                            streamedReasoning += delta.reasoning_content;
+                        }
+
+                        // Accumulate tool calls
+                        if (delta.tool_calls) {
+                            hasToolCalls = true;
+                            for (const tcDelta of delta.tool_calls) {
+                                const idx = tcDelta.index;
+                                let tc = streamedToolCalls.get(idx);
+                                if (!tc) {
+                                    tc = { id: tcDelta.id ?? '', function: { name: '', arguments: '' } };
+                                    streamedToolCalls.set(idx, tc);
+                                }
+                                if (tcDelta.id) tc.id = tcDelta.id;
+                                if (tcDelta.function?.name) tc.function.name = tcDelta.function.name;
+                                if (tcDelta.function?.arguments) tc.function.arguments += tcDelta.function.arguments;
+                            }
+                        }
+
+                        // Track token usage from the final chunk
+                        if (chunk.usage) {
+                            this.totalPromptTokens = chunk.usage.prompt_tokens || 0;
+                            this.totalCompletionTokens = chunk.usage.completion_tokens || 0;
+                            this.totalTokens = chunk.usage.total_tokens || 0;
+                            streamComplete = true;
+                        }
                     }
 
-                    const msg = response.choices[0].message;
+                    // Commit the final line of streaming content
+                    if (!firstContentChunk) {
+                        process.stdout.write('\x1b[0m');
+                        if (!streamedContent.endsWith('\n')) {
+                            process.stdout.write('\n');
+                        }
+                    }
+                    // else: no visible content (tool-only), nothing to commit
+
+                    // Build final tool calls array from accumulated data
+                    const finalToolCalls = [];
+                    for (const tc of streamedToolCalls.values()) {
+                        finalToolCalls.push({
+                            id: tc.id,
+                            type: 'function',
+                            function: {
+                                name: tc.function.name,
+                                arguments: tc.function.arguments
+                            }
+                        });
+                    }
+
+                    const msg = {
+                        content: streamedContent,
+                        reasoning_content: streamedReasoning || undefined,
+                        tool_calls: finalToolCalls.length > 0 ? finalToolCalls : undefined
+                    };
 
                     // Catch some mistakes.
-                    if (!msg.content.trim() && !msg.tool_calls?.length) {
+                    if (!msg.content?.trim() && !msg.tool_calls?.length) {
                         if (msg.reasoning_content?.includes('<tool_call>')) {
                             this.context.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_call>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
                         } else {
@@ -182,12 +362,9 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
                         if (msg.reasoning_content) assistantMsg.reasoning_content = msg.reasoning_content;
                         this.context.push(assistantMsg);
 
-                        // Display assistant content first if present
-                        this.displayMessage('assistant', msg.content);
-
                         for (const tc of msg.tool_calls) {
                             const args = JSON.parse(tc.function.arguments);
-                            // Display tool name and abbreviated arguments (limit each property to 10 chars)
+                            // Display tool name and abbreviated arguments (limit each property to 16 chars)
                             const abbreviatedArgs = Object.fromEntries(
                                 Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 16 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
                             );
@@ -203,11 +380,12 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
                         const finalMsg = { role: 'assistant', content: finalContent };
                         if (msg.reasoning_content) finalMsg.reasoning_content = msg.reasoning_content;
                         this.context.push(finalMsg);
-                        this.displayMessage('assistant', finalContent);
                         this.displayTokenUsage();
                         break; // Exit tool loop
                     }
                 } catch (err) {
+                    // Clear any partial line on error
+                    process.stdout.write('\x1b[0m\x1b[K\n');
                     console.error(`\n❌ API Error: ${err.message}\n`);
                     break;
                 }
