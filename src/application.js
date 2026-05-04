@@ -35,6 +35,9 @@ export class Application {
         // readline interface
         this.rl = null;
 
+        // Abort controller for streaming responses
+        this.abortController = null;
+
         // Instantiate Tool
         this.tool = new Tool(this);
 
@@ -43,6 +46,36 @@ export class Application {
 
         // Load latest system prompt
         this.systemPrompt = null;
+
+        // Streaming state
+        this.isStreaming = false;
+
+        // Set up interrupt detection once
+        this._setupInterruptDetection();
+    }
+
+    _setupInterruptDetection() {
+        // Detect ESC (0x1b) via raw data
+        this._dataHandler = (chunk) => {
+            if (this.isStreaming) {
+                for (const byte of chunk) {
+                    if (byte === 0x1b) {
+                        this.abortCurrent();
+                        break;
+                    }
+                }
+            }
+        };
+        process.stdin.on('data', this._dataHandler);
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+    }
+
+    abortCurrent() {
+        if (this.abortController) {
+            this.abortController.abort();
+            this.abortController = null;
+        }
     }
 
     async init() {
@@ -94,7 +127,7 @@ export class Application {
         return res.json();
     }
 
-    async *fetchCompletionStream(messages) {
+    async *fetchCompletionStream(messages, signal = null) {
         const res = await fetch(`${this.lmStudioUrl}/v1/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -105,7 +138,8 @@ export class Application {
                 tool_choice: 'auto',
                 temperature: 0.6,
                 stream: true
-            })
+            }),
+            signal
         });
         if (!res.ok) throw new Error(`LM Studio API error: ${res.status} ${res.statusText}`);
 
@@ -235,10 +269,14 @@ export class Application {
         console.log('🚀 LLM Coding Harness started. Enter your prompt or type "/help" for available commands.\n');
 
         process.on('SIGINT', async () => {
-            await this.context.save();
-            await this.config.save();
-            this.rl.close();
-            process.exit(0);
+            if (this.isStreaming) {
+                this.abortCurrent();
+            } else {
+                await this.context.save();
+                await this.config.save();
+                this.rl.close();
+                process.exit(0);
+            }
         });
 
         while (true) {
@@ -251,124 +289,140 @@ export class Application {
 
             this.context.push({ role: 'user', content: userPrompt });
 
-            while (true) {
-                try {
-                    // Prune context before sending to API if liveprune is enabled
-                    const messagesToSend = this.context.prepared(this.systemPrompt?.content, this.config.getLiveprune());
-                    // Accumulators for streaming response
-                    let streamedContent = '';
-                    let streamedReasoning = '';
-                    const streamedToolCalls = new Map(); // index -> { id, function: { name, arguments } }
-                    let hasToolCalls = false;
-                    let streamComplete = false;
-                    let firstContentChunk = true;
-                    let bufferedLeadingContent = '';
+            // Enable streaming interrupt for this response
+            this.isStreaming = true;
+            this.abortController = new AbortController();
 
-                    // Stream the response and display progressively
-                    for await (const chunk of this.fetchCompletionStream(messagesToSend)) {
-                        const delta = chunk.choices?.[0]?.delta;
-                        if (!delta) continue;
+            try {
+                while (true) {
+                    try {
+                        // Prune context before sending to API if liveprune is enabled
+                        const messagesToSend = this.context.prepared(this.systemPrompt?.content, this.config.getLiveprune());
+                        // Accumulators for streaming response
+                        let streamedContent = '';
+                        let streamedReasoning = '';
+                        const streamedToolCalls = new Map(); // index -> { id, function: { name, arguments } }
+                        let hasToolCalls = false;
+                        let streamComplete = false;
+                        let firstContentChunk = true;
+                        let bufferedLeadingContent = '';
 
-                        // Accumulate content
-                        if (delta.content) {
-                            streamedContent += delta.content;
-                            if (firstContentChunk) {
-                                bufferedLeadingContent += delta.content;
-                                const trimmedStart = bufferedLeadingContent.trimStart();
-                                if (trimmedStart.length > 0) {
-                                    this.displayMessageChunk('assistant', trimmedStart, true, false);
-                                    firstContentChunk = false;
-                                    bufferedLeadingContent = '';
+                        // Stream the response and display progressively
+                        for await (const chunk of this.fetchCompletionStream(messagesToSend, this.abortController.signal)) {
+                            const delta = chunk.choices?.[0]?.delta;
+                            if (!delta) continue;
+
+                            // Accumulate content
+                            if (delta.content) {
+                                streamedContent += delta.content;
+                                if (firstContentChunk) {
+                                    bufferedLeadingContent += delta.content;
+                                    const trimmedStart = bufferedLeadingContent.trimStart();
+                                    if (trimmedStart.length > 0) {
+                                        this.displayMessageChunk('assistant', trimmedStart, true, false);
+                                        firstContentChunk = false;
+                                        bufferedLeadingContent = '';
+                                    }
+                                } else {
+                                    this.displayMessageChunk('assistant', delta.content, false, false);
                                 }
+                            }
+
+                            // Accumulate reasoning content
+                            if (delta.reasoning_content) {
+                                streamedReasoning += delta.reasoning_content;
+                            }
+
+                            // Accumulate tool calls
+                            if (delta.tool_calls) {
+                                hasToolCalls = true;
+                                for (const tcDelta of delta.tool_calls) {
+                                    const idx = tcDelta.index;
+                                    let tc = streamedToolCalls.get(idx);
+                                    if (!tc) {
+                                        tc = { id: tcDelta.id ?? '', function: { name: '', arguments: '' } };
+                                        streamedToolCalls.set(idx, tc);
+                                    }
+                                    if (tcDelta.id) tc.id = tcDelta.id;
+                                    if (tcDelta.function?.name) tc.function.name = tcDelta.function.name;
+                                    if (tcDelta.function?.arguments) tc.function.arguments += tcDelta.function.arguments;
+                                }
+                            }
+
+                            // Track token usage from the final chunk
+                            if (chunk.usage) {
+                                this.totalPromptTokens = chunk.usage.prompt_tokens || 0;
+                                this.totalCompletionTokens = chunk.usage.completion_tokens || 0;
+                                this.totalTokens = chunk.usage.total_tokens || 0;
+                                streamComplete = true;
+                            }
+                        }
+
+                        // Commit the final line of streaming content
+                        if (!firstContentChunk) {
+                            process.stdout.write('\x1b[0m');
+                            if (!streamedContent.endsWith('\n')) {
+                                process.stdout.write('\n');
+                            }
+                        }
+                        // else: no visible content (tool-only), nothing to commit
+
+                        // Build final tool calls array from accumulated data
+                        const finalToolCalls = [];
+                        for (const tc of streamedToolCalls.values()) {
+                            finalToolCalls.push({
+                                id: tc.id,
+                                type: 'function',
+                                function: {
+                                    name: tc.function.name,
+                                    arguments: tc.function.arguments
+                                }
+                            });
+                        }
+
+                        const msg = {
+                            content: streamedContent,
+                            reasoning_content: streamedReasoning || undefined,
+                            tool_calls: finalToolCalls.length > 0 ? finalToolCalls : undefined
+                        };
+
+                        // Catch some mistakes.
+                        if (!msg.content?.trim() && !msg.tool_calls?.length) {
+                            if (msg.reasoning_content?.includes('<tool_call>')) {
+                                this.context.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_call>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
                             } else {
-                                this.displayMessageChunk('assistant', delta.content, false, false);
+                                this.context.push({ role: 'system', content: 'You did not call a tool or respond to the user. Please either call a tool or respond to the user.' });
                             }
                         }
 
-                        // Accumulate reasoning content
-                        if (delta.reasoning_content) {
-                            streamedReasoning += delta.reasoning_content;
-                        }
-
-                        // Accumulate tool calls
-                        if (delta.tool_calls) {
-                            hasToolCalls = true;
-                            for (const tcDelta of delta.tool_calls) {
-                                const idx = tcDelta.index;
-                                let tc = streamedToolCalls.get(idx);
-                                if (!tc) {
-                                    tc = { id: tcDelta.id ?? '', function: { name: '', arguments: '' } };
-                                    streamedToolCalls.set(idx, tc);
-                                }
-                                if (tcDelta.id) tc.id = tcDelta.id;
-                                if (tcDelta.function?.name) tc.function.name = tcDelta.function.name;
-                                if (tcDelta.function?.arguments) tc.function.arguments += tcDelta.function.arguments;
-                            }
-                        }
-
-                        // Track token usage from the final chunk
-                        if (chunk.usage) {
-                            this.totalPromptTokens = chunk.usage.prompt_tokens || 0;
-                            this.totalCompletionTokens = chunk.usage.completion_tokens || 0;
-                            this.totalTokens = chunk.usage.total_tokens || 0;
-                            streamComplete = true;
-                        }
-                    }
-
-                    // Commit the final line of streaming content
-                    if (!firstContentChunk) {
-                        process.stdout.write('\x1b[0m');
-                        if (!streamedContent.endsWith('\n')) {
-                            process.stdout.write('\n');
-                        }
-                    }
-                    // else: no visible content (tool-only), nothing to commit
-
-                    // Build final tool calls array from accumulated data
-                    const finalToolCalls = [];
-                    for (const tc of streamedToolCalls.values()) {
-                        finalToolCalls.push({
-                            id: tc.id,
-                            type: 'function',
-                            function: {
-                                name: tc.function.name,
-                                arguments: tc.function.arguments
-                            }
-                        });
-                    }
-
-                    const msg = {
-                        content: streamedContent,
-                        reasoning_content: streamedReasoning || undefined,
-                        tool_calls: finalToolCalls.length > 0 ? finalToolCalls : undefined
-                    };
-
-                    // Catch some mistakes.
-                    if (!msg.content?.trim() && !msg.tool_calls?.length) {
-                        if (msg.reasoning_content?.includes('<tool_call>')) {
-                            this.context.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_call>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
+                        // Handle tool calls
+                        if (msg.tool_calls?.length) {
+                            await this.handleToolCalls(msg, messagesToSend);
                         } else {
-                            this.context.push({ role: 'system', content: 'You did not call a tool or respond to the user. Please either call a tool or respond to the user.' });
+                            // Final text response
+                            const finalContent = msg.content ?? '';
+                            const finalMsg = { role: 'assistant', content: finalContent };
+                            if (msg.reasoning_content) finalMsg.reasoning_content = msg.reasoning_content;
+                            this.context.push(finalMsg);
+                            this.displayTokenUsage();
+                            break; // Exit tool loop
                         }
+                    } catch (err) {
+                        // Clear any partial line on error
+                        process.stdout.write('\x1b[0m\x1b[K\n');
+                        if (err.name === 'AbortError') {
+                            console.log('\n⚠️ Response interrupted.\n');
+                        } else {
+                            console.error(`\n❌ API Error: ${err.message}\n`);
+                        }
+                        break;
                     }
-
-                    // Handle tool calls
-                    if (msg.tool_calls?.length) {
-                        await this.handleToolCalls(msg, messagesToSend);
-                    } else {
-                        // Final text response
-                        const finalContent = msg.content ?? '';
-                        const finalMsg = { role: 'assistant', content: finalContent };
-                        if (msg.reasoning_content) finalMsg.reasoning_content = msg.reasoning_content;
-                        this.context.push(finalMsg);
-                        this.displayTokenUsage();
-                        break; // Exit tool loop
-                    }
-                } catch (err) {
-                    // Clear any partial line on error
-                    process.stdout.write('\x1b[0m\x1b[K\n');
-                    console.error(`\n❌ API Error: ${err.message}\n`);
-                    break;
+                }
+            } finally {
+                // Disable streaming interrupt after response completes
+                this.isStreaming = false;
+                if (this.abortController) {
+                    this.abortController = null;
                 }
             }
         }
