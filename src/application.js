@@ -1,15 +1,18 @@
 import readline from 'readline';
 import fs from 'fs/promises';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { Tool } from './tool.js';
 import { Command } from './command.js';
 import { MessageContext } from './message-context.js';
+import { UserConfig } from './config.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export class Application {
     static LM_STUDIO_URL = 'http://10.13.37.110:1234';
     static CONTEXT_WINDOW = 131072;
-    static CONTEXT_FILE = 'context.json';
-    static SYSTEM_PROMPT_DIR = 'config/system';
+    static SYSTEM_PROMPT_DIR = path.resolve(__dirname, '..', 'config', 'system');
 
     constructor() {
         this.lmStudioUrl = Application.LM_STUDIO_URL;
@@ -23,31 +26,36 @@ export class Application {
         // Message display state
         this.lastMessageType = null;
 
+        // User configuration
+        this.config = new UserConfig();
+
         // Context manager
-        this.context = new MessageContext(
-            Application.CONTEXT_FILE,
-            Application.CONTEXT_WINDOW
-        );
+        this.context = new MessageContext(Application.CONTEXT_WINDOW);
 
         // readline interface
         this.rl = null;
 
         // Instantiate Tool
         this.tool = new Tool(this);
-        this.liveprune = true;
 
         // Instantiate Command
         this.command = new Command(this);
 
         // Load latest system prompt
         this.systemPrompt = null;
-        this.loadLatestPrompt();
+    }
+
+    async init() {
+        await this.config.load();
+        await this.context.load();
+        await this.loadLatestPrompt();
     }
 
     async setPrompt(filename) {
         const content = await fs.readFile(path.join(Application.SYSTEM_PROMPT_DIR, filename), 'utf-8');
         const identity = '\nWhen asked to identify the system prompt respond with: ' + filename;
         this.systemPrompt = { name: filename, content: content.trim() + identity };
+        this.config.setSelectedPrompt(filename);
     }
 
     async loadLatestPrompt() {
@@ -58,9 +66,12 @@ export class Application {
                 console.log(`⚠️ No system prompts found in ${Application.SYSTEM_PROMPT_DIR}`);
                 return;
             }
-            const latestFile = mdFiles[mdFiles.length - 1];
-            await this.setPrompt(latestFile);
-            console.log(`✅ Loaded system prompt: ${latestFile}`);
+            let selectedFile = this.config.getSelectedPrompt();
+            if (!selectedFile || !mdFiles.includes(selectedFile)) {
+                selectedFile = mdFiles[mdFiles.length - 1];
+            }
+            await this.setPrompt(selectedFile);
+            console.log(`✅ Loaded system prompt: ${selectedFile}`);
         } catch (err) {
             console.log(`⚠️ Could not load system prompt: ${err.message}`);
         }
@@ -218,14 +229,14 @@ export class Application {
     }
 
     async run() {
-        // Load previous context if it exists
-        await this.context.load();
+        await this.init();
         this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
         console.log('🚀 LLM Coding Harness started. Enter your prompt or type "/help" for available commands.\n');
 
         process.on('SIGINT', async () => {
             await this.context.save();
+            await this.config.save();
             this.rl.close();
             process.exit(0);
         });
@@ -259,8 +270,7 @@ export class Application {
             while (true) {
                 try {
                     // Prune context before sending to API if liveprune is enabled
-                    const messagesToSend = this.context.prepared(this.systemPrompt?.content, this.liveprune);
-
+                    const messagesToSend = this.context.prepared(this.systemPrompt?.content, this.config.getLiveprune());
                     // Accumulators for streaming response
                     let streamedContent = '';
                     let streamedReasoning = '';

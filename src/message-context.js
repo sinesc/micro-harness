@@ -1,13 +1,26 @@
 import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 
 export class MessageContext {
     static CONTEXT_WINDOW = 131072;
-    static CONTEXT_FILE = 'context.json';
 
-    constructor(contextFile = MessageContext.CONTEXT_FILE, contextWindow = MessageContext.CONTEXT_WINDOW) {
-        this.contextFile = contextFile;
+    static _getConfigDir() {
+        return path.join(os.homedir(), '.config', 'micro-harness');
+    }
+
+    static _contextFilePath(projectPath) {
+        const configDir = MessageContext._getConfigDir();
+        const safeProjectPath = projectPath.replace(/[\\/]/g, '-');
+        return path.join(configDir, `context.${safeProjectPath}.json`);
+    }
+
+    constructor(contextWindow = MessageContext.CONTEXT_WINDOW) {
         this.contextWindow = contextWindow;
         this.messages = [];
+
+        const cwd = process.cwd();
+        this.contextFile = MessageContext._contextFilePath(cwd);
     }
 
     push(message) {

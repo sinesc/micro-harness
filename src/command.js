@@ -14,16 +14,19 @@ export class Command {
     }
 
     async help() {
-        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/prompt [index or name] - List or set system prompt\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/liveprune - Toggle live pruning of stale context (currently ${this.application.liveprune ? 'ON' : 'OFF'})\n/reset - Clear current context (keeping only system prompt)`;
+        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/prompt [index or name] - List or set system prompt\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/liveprune - Toggle live pruning of stale context (currently ${this.application.config.getLiveprune() ? 'ON' : 'OFF'})\n/reset - Clear current context (keeping only system prompt)`;
     }
 
-    toggleLiveprune() {
-        this.application.liveprune = !this.application.liveprune;
-        return `Live pruning is now ${this.application.liveprune ? 'ON' : 'OFF'}.`;
+    async toggleLiveprune() {
+        const newValue = !this.application.config.getLiveprune();
+        this.application.config.setLiveprune(newValue);
+        await this.application.config.save();
+        return `Live pruning is now ${newValue ? 'ON' : 'OFF'}.`;
     }
 
     async exit() {
         await this.application.context.save();
+        await this.application.config.save();
     }
 
     async models() {
@@ -174,7 +177,7 @@ export class Command {
                     throw new CommandError(`Failed to parse tool arguments: ${err.message}`);
                 }
             case 'liveprune':
-                return this.toggleLiveprune();
+                return await this.toggleLiveprune();
             case 'context':
                 return await this.context();
             case 'reset':
