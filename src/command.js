@@ -155,7 +155,7 @@ export class Command {
         switch (cmd) {
             case 'exit':
                 await this.exit();
-                return 'exit';
+                throw new CommandError('exit');
             case 'help':
                 return await this.help();
             case 'models':

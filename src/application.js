@@ -245,25 +245,9 @@ export class Application {
             const userPrompt = await new Promise(resolve => this.rl.question('> ', resolve));
             console.log("");
 
-            if (userPrompt.slice(0, 1) === '/') {
-                const matches = userPrompt.match(/^\/(?<cmd>[a-zA-Z_]+)(?:\s+(?<args>.*))?$/);
-                const cmd = matches?.groups?.cmd ?? null;
-                const args = matches?.groups?.args ?? null;
-                if (!cmd) {
-                    console.log(`\nInvalid command syntax\n`);
-                } else {
-                    try {
-                        const result = await this.command.exec(cmd, args);
-                        if (result === 'exit') {
-                            break;
-                        }
-                        console.log(`${result}\n`);
-                    } catch (err) {
-                        console.log(`❌ ${err.message}\n`);
-                    }
-                }
-                continue;
-            }
+            const cmd = await this.handleCommand(userPrompt);
+            if (cmd === null) break;
+            else if (cmd === true) continue;
 
             this.context.push({ role: 'user', content: userPrompt });
 
@@ -293,7 +277,7 @@ export class Application {
                                 const trimmedStart = bufferedLeadingContent.trimStart();
                                 if (trimmedStart.length > 0) {
                                     this.displayMessageChunk('assistant', trimmedStart, true, false);
-                            firstContentChunk = false;
+                                    firstContentChunk = false;
                                     bufferedLeadingContent = '';
                                 }
                             } else {
@@ -370,23 +354,7 @@ export class Application {
 
                     // Handle tool calls
                     if (msg.tool_calls?.length) {
-                        // Display any text message the model included with the tool call
-                        const assistantMsg = { role: 'assistant', content: msg.content };
-                        if (msg.reasoning_content) assistantMsg.reasoning_content = msg.reasoning_content;
-                        this.context.push(assistantMsg);
-
-                        for (const tc of msg.tool_calls) {
-                            const args = JSON.parse(tc.function.arguments);
-                            // Display tool name and abbreviated arguments (limit each property to 16 chars)
-                            const abbreviatedArgs = Object.fromEntries(
-                                Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 16 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
-                            );
-                            const structuredResult = await this.tool.exec(tc.function.name, args);
-                            this.displayMessage('tool', `${tc.function.name} ${JSON.stringify(abbreviatedArgs).slice(1, -1)}`, structuredResult.error ? 'red' : 'grey');
-                            this.context.push({ role: 'assistant', content: null, tool_calls: [tc] });
-                            // Store structured result error as metadata for live-pruning
-                            this.context.push({ role: 'tool', tool_call_id: tc.id, content: structuredResult.error ? 'ERROR: ' + structuredResult.result : structuredResult.result, _toolError: structuredResult.error });
-                        }
+                        await this.handleToolCalls(msg, messagesToSend);
                     } else {
                         // Final text response
                         const finalContent = msg.content ?? '';
@@ -405,5 +373,54 @@ export class Application {
             }
         }
         this.rl.close();
+    }
+
+    /**
+     * Handle user input commands that start with '/'. Returns false if not a command, null to exit.
+     */
+    async handleCommand(userPrompt) {
+        if (userPrompt.slice(0, 1) !== '/') {
+            return false;
+        }
+        const matches = userPrompt.match(/^\/(?<cmd>[a-zA-Z_]+)(?:\s+(?<args>.*))?$/);
+        const cmd = matches?.groups?.cmd ?? null;
+        const args = matches?.groups?.args ?? null;
+        if (!cmd) {
+            console.log(`\nInvalid command syntax\n`);
+        } else {
+            try {
+                const result = await this.command.exec(cmd, args);
+                console.log(`${result}\n`);
+            } catch (err) {
+                if (err.message === 'exit') {
+                    return null;
+                }
+                console.log(`❌ ${err.message}\n`);
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Handle tool calls from a finalized assistant message. Executes each tool and pushes results to context.
+     */
+    async handleToolCalls(msg, messagesToSend) {
+        // Display any text message the model included with the tool call
+        const assistantMsg = { role: 'assistant', content: msg.content };
+        if (msg.reasoning_content) assistantMsg.reasoning_content = msg.reasoning_content;
+        this.context.push(assistantMsg);
+
+        for (const tc of msg.tool_calls) {
+            const args = JSON.parse(tc.function.arguments);
+            // Display tool name and abbreviated arguments (limit each property to 16 chars)
+            const abbreviatedArgs = Object.fromEntries(
+                Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 16 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
+            );
+            const structuredResult = await this.tool.exec(tc.function.name, args);
+            this.displayMessage('tool', `${tc.function.name} ${JSON.stringify(abbreviatedArgs).slice(1, -1)}`, structuredResult.error ? 'red' : 'grey');
+            this.context.push({ role: 'assistant', content: null, tool_calls: [tc] });
+            // Store structured result error as metadata for live-pruning
+            this.context.push({ role: 'tool', tool_call_id: tc.id, content: structuredResult.error ? 'ERROR: ' + structuredResult.result : structuredResult.result, _toolError: structuredResult.error });
+        }
     }
 }
