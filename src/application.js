@@ -1,4 +1,6 @@
 import readline from 'readline';
+import fs from 'fs/promises';
+import path from 'path';
 import { Tool } from './tool.js';
 import { Command } from './command.js';
 import { MessageContext } from './message-context.js';
@@ -7,30 +9,7 @@ export class Application {
     static LM_STUDIO_URL = 'http://10.13.37.110:1234';
     static CONTEXT_WINDOW = 131072;
     static CONTEXT_FILE = 'context.json';
-
-    static SYSTEM_PROMPT = `You are a coding assistant operating in a terminal harness. You have access to file tools.
-IMPORTANT RULES:
-1. If you want to edit a file, call read_file first. The output includes line numbers for use with edit_file.
-2. When using the edit_file tool you MUST include unmodified leading/trailing anchor lines in your edit so that the tool can match them against the contents of the file and correct for minor line offsets.
-3. Do not compensate for line-drift of consecutive edits, the edit_file tool already accounts for it: line numbers remain stable across edits until you explicitly call read_file again.
-4. You may perform multiple edits on a file without calling read_file inbetween. Unless the edit_file tool informs you of possible issues with your edit, assume the edit worked and avoid re-reading the file.
-5. Always provide a short concise sentence explaining the intent of your next set of tool calls, e.g. "Creating project file structure.", "Reading files required to understand the issue.", ...
-6. You must use the todo tool before implementing non-trivial changes. Provide an overview or a brief list of required steps to complete the implementation. Don't reason too much about this being perfectly complete/correct. You can always deviate from your original plan as the need arises.
-7. Once you are done with the changes, run a syntax check (if available for the file-type) and verify your logic is sound.
-8. Always return concise, useful feedback on changes made.
-
-edit_file examples, file:
-\`\`\`
-first
-second
-third
-fourth
-\`\`\`
-
-To remove line "second": {"path":"<file>","start_line":1,"end_line":3,"replacement":"first\nthird"}
-To add lines between "second" and "third": {"path":"<file>","start_line":2,"end_line":3,"replacement":"second\na new line\nanother new line\nthird"}
-To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line":4,"replacement":"third\nreplaced fourth line"}
-`;
+    static SYSTEM_PROMPT_DIR = 'config/system';
 
     constructor() {
         this.lmStudioUrl = Application.LM_STUDIO_URL;
@@ -59,6 +38,32 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
 
         // Instantiate Command
         this.command = new Command(this);
+
+        // Load latest system prompt
+        this.systemPrompt = null;
+        this.loadLatestPrompt();
+    }
+
+    async setPrompt(filename) {
+        const content = await fs.readFile(path.join(Application.SYSTEM_PROMPT_DIR, filename), 'utf-8');
+        const identity = '\nWhen asked to identify the system prompt respond with: ' + filename;
+        this.systemPrompt = { name: filename, content: content.trim() + identity };
+    }
+
+    async loadLatestPrompt() {
+        try {
+            const files = await fs.readdir(Application.SYSTEM_PROMPT_DIR);
+            const mdFiles = files.filter(f => f.endsWith('.md')).sort();
+            if (mdFiles.length === 0) {
+                console.log(`⚠️ No system prompts found in ${Application.SYSTEM_PROMPT_DIR}`);
+                return;
+            }
+            const latestFile = mdFiles[mdFiles.length - 1];
+            await this.setPrompt(latestFile);
+            console.log(`✅ Loaded system prompt: ${latestFile}`);
+        } catch (err) {
+            console.log(`⚠️ Could not load system prompt: ${err.message}`);
+        }
     }
 
     async fetchCompletion(messages) {
@@ -217,7 +222,7 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
         await this.context.load();
         this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-        console.log('🚀 LLM Coding Harness started. Type "/exit" to quit.\n');
+        console.log('🚀 LLM Coding Harness started. Enter your prompt or type "/help" for available commands.\n');
 
         process.on('SIGINT', async () => {
             await this.context.save();
@@ -254,7 +259,7 @@ To replace line "fourth" (last line): {"path":"<file>","start_line":3,"end_line"
             while (true) {
                 try {
                     // Prune context before sending to API if liveprune is enabled
-                    const messagesToSend = this.context.prepared(Application.SYSTEM_PROMPT, this.liveprune);
+                    const messagesToSend = this.context.prepared(this.systemPrompt?.content, this.liveprune);
 
                     // Accumulators for streaming response
                     let streamedContent = '';

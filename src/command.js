@@ -1,3 +1,6 @@
+import fs from 'fs/promises';
+import { Application } from './application.js';
+
 export class CommandError extends Error {
     constructor(message) {
         super(message);
@@ -11,7 +14,7 @@ export class Command {
     }
 
     async help() {
-        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/liveprune - Toggle live pruning of stale context (currently ${this.application.liveprune ? 'ON' : 'OFF'})\n/reset - Clear current context (keeping only system prompt)`;
+        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/prompt [index or name] - List or set system prompt\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/liveprune - Toggle live pruning of stale context (currently ${this.application.liveprune ? 'ON' : 'OFF'})\n/reset - Clear current context (keeping only system prompt)`;
     }
 
     toggleLiveprune() {
@@ -72,8 +75,50 @@ export class Command {
         return `🔧 ${toolName} ${error?"error: ":"result:\n"}${result}`;
     }
 
+    async prompt(args) {
+        try {
+            const files = await fs.readdir(Application.SYSTEM_PROMPT_DIR);
+            const mdFiles = files.filter(f => f.endsWith('.md')).sort();
+
+            if (!args) {
+                // List available prompts
+                if (mdFiles.length === 0) {
+                    return `No system prompts available in ${Application.SYSTEM_PROMPT_DIR}`;
+                }
+                const currentName = this.application.systemPrompt?.name || '(none)';
+                let output = `📋 Available System Prompts:\n\n`;
+                mdFiles.forEach((f, i) => {
+                    const marker = f === currentName ? ' ← current' : '';
+                    output += `  ${i}. ${f}${marker}\n`;
+                });
+                return output;
+            }
+
+            // Set system prompt by index or name
+            const index = parseInt(args, 10);
+            let selectedFile = null;
+
+            if (!isNaN(index) && index >= 0 && index < mdFiles.length) {
+                selectedFile = mdFiles[index];
+            } else {
+                // Match by name (excluding path and extension)
+                selectedFile = mdFiles.find(f => f.replace(/\.md$/, '') === args);
+            }
+
+            if (!selectedFile) {
+                throw new CommandError(`Invalid prompt index or name. Use /prompt to see available options.`);
+            }
+
+            await this.application.setPrompt(selectedFile);
+            return `✅ Switched to system prompt: ${selectedFile}`;
+        } catch (err) {
+            if (err instanceof CommandError) throw err;
+            throw new CommandError(`Failed to load system prompt: ${err.message}`);
+        }
+    }
+
     async context() {
-        const stats = this.application.context.getStatistics(this.application.constructor.SYSTEM_PROMPT);
+        const stats = this.application.context.getStatistics(this.application.systemPrompt?.content);
 
         let output = `📊 Context Statistics:\n\n`;
         output += `  Messages: ${stats.fullCount} (full) → ${stats.prunedCount} (pruned) | Removed: ${stats.removedCount}\n`;
@@ -114,6 +159,8 @@ export class Command {
                 return await this.models();
             case 'model':
                 return await this.model(args);
+            case 'prompt':
+                return await this.prompt(args);
             case 'tool':
                 if (!args) {
                     throw new CommandError('Tool name is required. Usage: /tool <name> <json args>');
