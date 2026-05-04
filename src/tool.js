@@ -205,14 +205,14 @@ export class Tool {
             }
             this.fileChecksums.set(resolvedPath, this.#computeChecksum(content));
             this.filesDirtyAfterRead.delete(resolvedPath);
-            
+
             const lines = content.split(/\r?\n/);
             const totalLines = lines.length;
-            
+
             // Parse and validate line range
             let startIdx = 0; // 0-indexed
             let endIdx = totalLines - 1; // 0-indexed
-            
+
             if (start_line !== undefined && start_line !== null) {
                 const startLineNum = parseInt(start_line, 10);
                 if (isNaN(startLineNum)) {
@@ -226,7 +226,7 @@ export class Tool {
                 }
                 startIdx = startLineNum - 1; // Convert to 0-indexed
             }
-            
+
             if (end_line !== undefined && end_line !== null) {
                 const endLineNum = parseInt(end_line, 10);
                 if (isNaN(endLineNum)) {
@@ -240,11 +240,11 @@ export class Tool {
                 }
                 endIdx = endLineNum - 1; // Convert to 0-indexed
             }
-            
+
             if (startIdx > endIdx) {
                 throw new ToolError(`'end_line' must be greater than or equal to 'start_line'.`);
             }
-            
+
             // Extract the requested range
             const selectedLines = lines.slice(startIdx, endIdx + 1);
             return selectedLines.map((text, index) => `${startIdx + index + 1}\t${text}`).join("\n");
@@ -269,7 +269,7 @@ export class Tool {
 
     async undo() {
         if (this.editHistory.length === 0) {
-            throw new ToolError('No edits to undo.');
+            throw new ToolError('No edits to undo. Trying to undo a preview? Previews are not written to file until applied. There is nothing to undo yet.');
         }
 
         const lastEdit = this.editHistory.pop();
@@ -674,7 +674,7 @@ export class Tool {
         for (let i = endIdx + 1; i <= Math.min(lines.length - 1, endIdx + CONTEXT); i++)
             output.push(`${i + 1}\t${lines[i]}`);
 
-        output.push(`\nRetry your edit if this is not correct, otherwise call apply_preview {"id":"${id}"} to apply.`);
+        output.push(`\nRetry your edit if this is not correct, otherwise call apply_preview {"id":"${id}"} to apply. This is a preview, file not yet modified!`);
         return output.join('\n');
     }
 
