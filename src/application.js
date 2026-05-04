@@ -237,12 +237,7 @@ export class Application {
         process.stdout.flush?.();
     }
 
-    async run() {
-        await this.init();
-        this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
-        console.log('🚀 LLM Coding Harness started. Enter your prompt or type "/help" for available commands.\n');
-
+    _setupSigintHandler() {
         process.on('SIGINT', async () => {
             if (this.isStreaming) {
                 this.abortCurrent();
@@ -253,145 +248,136 @@ export class Application {
                 process.exit(0);
             }
         });
+    }
 
-        while (true) {
-            const userPrompt = await new Promise(resolve => this.rl.question('> ', resolve));
-            console.log("");
+    async _streamCompletion(messagesToSend) {
+        let content = '';
+        let reasoning = '';
+        const toolCallsMap = new Map();
+        let firstContentChunk = true;
+        let bufferedLeading = '';
 
-            const cmd = await this.handleCommand(userPrompt);
-            if (cmd === null) break;
-            else if (cmd === true) continue;
+        for await (const chunk of this.fetchCompletionStream(messagesToSend, this.abortController.signal)) {
+            const delta = chunk.choices?.[0]?.delta;
+            if (!delta) continue;
 
-            this.context.push({ role: 'user', content: userPrompt });
-
-            // Enable streaming interrupt for this response
-            this.isStreaming = true;
-            this.abortController = new AbortController();
-
-            try {
-                while (true) {
-                    try {
-                        // Prune context before sending to API if liveprune is enabled
-                        const messagesToSend = this.context.prepared(this.systemPrompt?.content, this.config.getLiveprune());
-                        // Accumulators for streaming response
-                        let streamedContent = '';
-                        let streamedReasoning = '';
-                        const streamedToolCalls = new Map(); // index -> { id, function: { name, arguments } }
-                        let hasToolCalls = false;
-                        let firstContentChunk = true;
-                        let bufferedLeadingContent = '';
-
-                        // Stream the response and display progressively
-                        for await (const chunk of this.fetchCompletionStream(messagesToSend, this.abortController.signal)) {
-                            const delta = chunk.choices?.[0]?.delta;
-                            if (!delta) continue;
-
-                            // Accumulate content
-                            if (delta.content) {
-                                streamedContent += delta.content;
-                                if (firstContentChunk) {
-                                    bufferedLeadingContent += delta.content;
-                                    const trimmedStart = bufferedLeadingContent.trimStart();
-                                    if (trimmedStart.length > 0) {
-                                        this.displayMessageChunk('assistant', trimmedStart, true, false);
-                                        firstContentChunk = false;
-                                        bufferedLeadingContent = '';
-                                    }
-                                } else {
-                                    this.displayMessageChunk('assistant', delta.content, false, false);
-                                }
-                            }
-
-                            // Accumulate reasoning content
-                            if (delta.reasoning_content) {
-                                streamedReasoning += delta.reasoning_content;
-                            }
-
-                            // Accumulate tool calls
-                            if (delta.tool_calls) {
-                                hasToolCalls = true;
-                                for (const tcDelta of delta.tool_calls) {
-                                    const idx = tcDelta.index;
-                                    let tc = streamedToolCalls.get(idx);
-                                    if (!tc) {
-                                        tc = { id: tcDelta.id ?? '', function: { name: '', arguments: '' } };
-                                        streamedToolCalls.set(idx, tc);
-                                    }
-                                    if (tcDelta.id) tc.id = tcDelta.id;
-                                    if (tcDelta.function?.name) tc.function.name = tcDelta.function.name;
-                                    if (tcDelta.function?.arguments) tc.function.arguments += tcDelta.function.arguments;
-                                }
-                            }
-                        }
-
-                        // Commit the final line of streaming content
-                        if (!firstContentChunk) {
-                            process.stdout.write('\x1b[0m');
-                            if (!streamedContent.endsWith('\n')) {
-                                process.stdout.write('\n');
-                            }
-                        }
-                        // else: no visible content (tool-only), nothing to commit
-
-                        // Build final tool calls array from accumulated data
-                        const finalToolCalls = [];
-                        for (const tc of streamedToolCalls.values()) {
-                            finalToolCalls.push({
-                                id: tc.id,
-                                type: 'function',
-                                function: {
-                                    name: tc.function.name,
-                                    arguments: tc.function.arguments
-                                }
-                            });
-                        }
-
-                        const msg = {
-                            content: streamedContent,
-                            reasoning_content: streamedReasoning || undefined,
-                            tool_calls: finalToolCalls.length > 0 ? finalToolCalls : undefined
-                        };
-
-                        // Catch some mistakes.
-                        if (!msg.content?.trim() && !msg.tool_calls?.length) {
-                            if (msg.reasoning_content?.includes('<tool_call>')) {
-                                this.context.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_call>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
-                            } else {
-                                this.context.push({ role: 'system', content: 'You did not call a tool or respond to the user. Please either call a tool or respond to the user.' });
-                            }
-                        }
-
-                        // Handle tool calls
-                        if (msg.tool_calls?.length) {
-                            await this.handleToolCalls(msg, messagesToSend);
-                        } else {
-                            // Final text response
-                            const finalContent = msg.content ?? '';
-                            const finalMsg = { role: 'assistant', content: finalContent };
-                            if (msg.reasoning_content) finalMsg.reasoning_content = msg.reasoning_content;
-                            this.context.push(finalMsg);
-                            console.log("");
-                            break; // Exit tool loop
-                        }
-                    } catch (err) {
-                        // Clear any partial line on error
-                        process.stdout.write('\x1b[0m\x1b[K\n');
-                        if (err.name === 'AbortError') {
-                            console.log('\n⚠️  Response interrupted.\n');
-                        } else {
-                            console.error(`\n❌ API Error: ${err.message}\n`);
-                        }
-                        break;
+            if (delta.content) {
+                content += delta.content;
+                if (firstContentChunk) {
+                    bufferedLeading += delta.content;
+                    const trimmedStart = bufferedLeading.trimStart();
+                    if (trimmedStart.length > 0) {
+                        this.displayMessageChunk('assistant', trimmedStart, true, false);
+                        firstContentChunk = false;
+                        bufferedLeading = '';
                     }
+                } else {
+                    this.displayMessageChunk('assistant', delta.content, false, false);
                 }
-            } finally {
-                // Disable streaming interrupt after response completes
-                this.isStreaming = false;
-                if (this.abortController) {
-                    this.abortController = null;
+            }
+
+            if (delta.reasoning_content) {
+                reasoning += delta.reasoning_content;
+            }
+
+            if (delta.tool_calls) {
+                for (const tcDelta of delta.tool_calls) {
+                    const idx = tcDelta.index;
+                    let tc = toolCallsMap.get(idx);
+                    if (!tc) {
+                        tc = { id: tcDelta.id ?? '', function: { name: '', arguments: '' } };
+                        toolCallsMap.set(idx, tc);
+                    }
+                    if (tcDelta.id) tc.id = tcDelta.id;
+                    if (tcDelta.function?.name) tc.function.name = tcDelta.function.name;
+                    if (tcDelta.function?.arguments) tc.function.arguments += tcDelta.function.arguments;
                 }
             }
         }
+
+        if (!firstContentChunk) {
+            process.stdout.write('\x1b[0m');
+            if (!content.endsWith('\n')) process.stdout.write('\n');
+        }
+
+        const toolCalls = [...toolCallsMap.values()].map(tc => ({
+            id: tc.id,
+            type: 'function',
+            function: { name: tc.function.name, arguments: tc.function.arguments }
+        }));
+
+        return {
+            content,
+            reasoning_content: reasoning || undefined,
+            tool_calls: toolCalls.length > 0 ? toolCalls : undefined
+        };
+    }
+
+    // Returns false to break the tool loop, true to continue.
+    async _handleAssistantMessage(msg, messagesToSend) {
+        if (!msg.content?.trim() && !msg.tool_calls?.length) {
+            if (msg.reasoning_content?.includes('<tool_call>')) {
+                this.context.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_call>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
+            } else {
+                this.context.push({ role: 'system', content: 'You did not call a tool or respond to the user. Please either call a tool or respond to the user.' });
+            }
+        }
+
+        if (msg.tool_calls?.length) {
+            await this.handleToolCalls(msg, messagesToSend);
+            return true;
+        }
+
+        const finalMsg = { role: 'assistant', content: msg.content ?? '' };
+        if (msg.reasoning_content) finalMsg.reasoning_content = msg.reasoning_content;
+        this.context.push(finalMsg);
+        console.log('');
+        return false;
+    }
+
+    async _processPrompt(userPrompt) {
+        this.context.push({ role: 'user', content: userPrompt });
+        this.isStreaming = true;
+        this.abortController = new AbortController();
+
+        try {
+            while (true) {
+                try {
+                    const messagesToSend = this.context.prepared(this.systemPrompt?.content, this.config.getLiveprune());
+                    const msg = await this._streamCompletion(messagesToSend);
+                    const continueLoop = await this._handleAssistantMessage(msg, messagesToSend);
+                    if (!continueLoop) break;
+                } catch (err) {
+                    process.stdout.write('\x1b[0m\x1b[K\n');
+                    if (err.name === 'AbortError') {
+                        console.log('\n⚠️  Response interrupted.\n');
+                    } else {
+                        console.error(`\n❌ API Error: ${err.message}\n`);
+                    }
+                    break;
+                }
+            }
+        } finally {
+            this.isStreaming = false;
+            if (this.abortController) this.abortController = null;
+        }
+    }
+
+    async run() {
+        await this.init();
+        this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        console.log('🚀 LLM Coding Harness started. Enter your prompt or type "/help" for available commands.\n');
+        this._setupSigintHandler();
+
+        while (true) {
+            const userPrompt = await new Promise(resolve => this.rl.question('> ', resolve));
+            console.log('');
+            const cmd = await this.handleCommand(userPrompt);
+            if (cmd === null) break;
+            else if (cmd === true) continue;
+            await this._processPrompt(userPrompt);
+        }
+
         this.rl.close();
     }
 
