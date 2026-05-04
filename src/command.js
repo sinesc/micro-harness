@@ -14,14 +14,69 @@ export class Command {
     }
 
     async help() {
-        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/prompt [index or name] - List or set system prompt\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/liveprune - Toggle live pruning of stale context (currently ${this.application.config.getLiveprune() ? 'ON' : 'OFF'})\n/reset - Clear current context (keeping only system prompt)`;
+        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/prompt [index or name] - List or set system prompt\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/config <setting> [ <value> ] - Get or set a config setting\n/reset - Clear current context (keeping only system prompt)`;
     }
 
-    async toggleLiveprune() {
-        const newValue = !this.application.config.getLiveprune();
-        this.application.config.setLiveprune(newValue);
-        await this.application.config.save();
-        return `Live pruning is now ${newValue ? 'ON' : 'OFF'}.`;
+    async config(args) {
+        const validSettings = ['endpoint', 'context', 'liveprune', 'temperature'];
+        if (!args || args.trim() === '') {
+            return `Usage: /config <setting> [ <value> ]\n\nAvailable settings:\n  endpoint    - LM Studio endpoint URL\n  context     - Context window size in tokens\n  liveprune   - Enable live pruning of stale context (${this.application.config.getLiveprune() ? 'ON' : 'OFF'})\n  temperature - Sampling temperature (0-2, default: ${this.application.config.getTemperature()})`;
+        }
+
+        const parts = args.trim().split(/\s+/);
+        const settingName = parts[0].toLowerCase();
+        const settingValue = parts.slice(1).join(' ');
+
+        if (!validSettings.includes(settingName)) {
+            throw new CommandError(`Unknown setting: ${settingName}. Valid settings: ${validSettings.join(', ')}`);
+        }
+
+        // Get current value if no new value provided
+        if (settingValue === '' || settingValue === undefined) {
+            switch (settingName) {
+                case 'endpoint':
+                    return `endpoint = ${this.application.config.getEndpoint()}`;
+                case 'context':
+                    return `context = ${this.application.config.getContextWindow()}`;
+                case 'liveprune':
+                    return `liveprune = ${this.application.config.getLiveprune()}`;
+                case 'temperature':
+                    return `temperature = ${this.application.config.getTemperature()}`;
+            }
+        }
+
+        // Set new value
+        try {
+            switch (settingName) {
+                case 'endpoint':
+                    this.application.config.setEndpoint(settingValue);
+                    break;
+                case 'context':
+                    this.application.config.setContextWindow(settingValue);
+                    break;
+                case 'liveprune':
+                    this.application.config.setLiveprune(settingValue);
+                    break;
+                case 'temperature':
+                    this.application.config.setTemperature(settingValue);
+                    break;
+            }
+            await this.application.config.save();
+
+            // Return updated value
+            switch (settingName) {
+                case 'endpoint':
+                    return `endpoint = ${this.application.config.getEndpoint()}`;
+                case 'context':
+                    return `context = ${this.application.config.getContextWindow()}`;
+                case 'liveprune':
+                    return `liveprune = ${this.application.config.getLiveprune()}`;
+                case 'temperature':
+                    return `temperature = ${this.application.config.getTemperature()}`;
+            }
+        } catch (err) {
+            throw new CommandError(err.message);
+        }
     }
 
     async exit() {
@@ -31,7 +86,7 @@ export class Command {
 
     async models() {
         try {
-            const res = await fetch(`${this.application.lmStudioUrl}/v1/models`);
+            const res = await fetch(`${this.application.config.getEndpoint()}/v1/models`);
             if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
             const data = await res.json();
             const apiModels = (data.data?.map(m => m.id) || []).sort();
@@ -46,7 +101,7 @@ export class Command {
             return `Current model: ${this.application.currentModel}`;
         }
         try {
-            const res = await fetch(`${this.application.lmStudioUrl}/v1/models`);
+            const res = await fetch(`${this.application.config.getEndpoint()}/v1/models`);
             if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
             const data = await res.json();
             const apiModels = (data.data?.map(m => m.id) || []).sort();
@@ -176,8 +231,8 @@ export class Command {
                 } catch (err) {
                     throw new CommandError(`Failed to parse tool arguments: ${err.message}`);
                 }
-            case 'liveprune':
-                return await this.toggleLiveprune();
+            case 'config':
+                return await this.config(args);
             case 'context':
                 return await this.context();
             case 'reset':

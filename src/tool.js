@@ -420,8 +420,8 @@ export class Tool {
         // file at start_line/end_line to prevent silently dropping content.
         // Anchors are waived at file boundaries.  Resolution priority per anchor:
         //   1. exact at expected position  2. trim at expected position
-        //   3. exact fuzzy ±5 lines        4. trim fuzzy ±5 lines
-        const FUZZY_RADIUS = 5;
+        //   3. exact fuzzy ±x lines        4. trim fuzzy ±x lines
+        const FUZZY_RADIUS = 10;
         let endDelta = 0;
         let startTrimFixed = false;
         let endTrimFixed = false;

@@ -3,7 +3,6 @@ import os from 'os';
 import path from 'path';
 
 export class MessageContext {
-    static CONTEXT_WINDOW = 131072;
 
     static _getConfigDir() {
         return path.join(os.homedir(), '.config', 'micro-harness');
@@ -15,8 +14,7 @@ export class MessageContext {
         return path.join(configDir, `context.${safeProjectPath}.json`);
     }
 
-    constructor(contextWindow = MessageContext.CONTEXT_WINDOW) {
-        this.contextWindow = contextWindow;
+    constructor() {
         this.messages = [];
 
         const cwd = process.cwd();

@@ -10,12 +10,9 @@ import { UserConfig } from './config.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export class Application {
-    static LM_STUDIO_URL = 'http://10.13.37.110:1234';
-    static CONTEXT_WINDOW = 131072;
     static SYSTEM_PROMPT_DIR = path.resolve(__dirname, '..', 'config', 'system');
 
     constructor() {
-        this.lmStudioUrl = Application.LM_STUDIO_URL;
         this.currentModel = 'local-model';
 
         // Token usage tracking
@@ -30,7 +27,7 @@ export class Application {
         this.config = new UserConfig();
 
         // Context manager
-        this.context = new MessageContext(Application.CONTEXT_WINDOW);
+        this.context = new MessageContext();
 
         // readline interface
         this.rl = null;
@@ -110,25 +107,8 @@ export class Application {
         }
     }
 
-    async fetchCompletion(messages) {
-        const res = await fetch(`${this.lmStudioUrl}/v1/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model: this.currentModel,
-                messages,
-                tools: Tool.TOOLS,
-                tool_choice: 'auto',
-                temperature: 0.6,
-                stream: false
-            })
-        });
-        if (!res.ok) throw new Error(`LM Studio API error: ${res.status} ${res.statusText}`);
-        return res.json();
-    }
-
     async *fetchCompletionStream(messages, signal = null) {
-        const res = await fetch(`${this.lmStudioUrl}/v1/chat/completions`, {
+        const res = await fetch(`${this.config.getEndpoint()}/v1/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -136,12 +116,12 @@ export class Application {
                 messages,
                 tools: Tool.TOOLS,
                 tool_choice: 'auto',
-                temperature: 0.6,
+                temperature: this.config.getTemperature(),
                 stream: true
             }),
             signal
         });
-        if (!res.ok) throw new Error(`LM Studio API error: ${res.status} ${res.statusText}`);
+        if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
 
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
@@ -179,11 +159,6 @@ export class Application {
         } finally {
             reader.releaseLock();
         }
-    }
-
-    displayTokenUsage() {
-        const remaining = Math.max(0, this.context.contextWindow - this.totalPromptTokens);
-        console.log(`\n📊 Token Usage: ${this.totalTokens} total (${this.totalPromptTokens} prompt + ${this.totalCompletionTokens} completion) | Context: ${this.totalPromptTokens}/${this.context.contextWindow} (${remaining} remaining)\n`);
     }
 
     displayMessage(role, content, color = null) {
@@ -303,7 +278,6 @@ export class Application {
                         let streamedReasoning = '';
                         const streamedToolCalls = new Map(); // index -> { id, function: { name, arguments } }
                         let hasToolCalls = false;
-                        let streamComplete = false;
                         let firstContentChunk = true;
                         let bufferedLeadingContent = '';
 
@@ -347,14 +321,6 @@ export class Application {
                                     if (tcDelta.function?.name) tc.function.name = tcDelta.function.name;
                                     if (tcDelta.function?.arguments) tc.function.arguments += tcDelta.function.arguments;
                                 }
-                            }
-
-                            // Track token usage from the final chunk
-                            if (chunk.usage) {
-                                this.totalPromptTokens = chunk.usage.prompt_tokens || 0;
-                                this.totalCompletionTokens = chunk.usage.completion_tokens || 0;
-                                this.totalTokens = chunk.usage.total_tokens || 0;
-                                streamComplete = true;
                             }
                         }
 
@@ -404,14 +370,14 @@ export class Application {
                             const finalMsg = { role: 'assistant', content: finalContent };
                             if (msg.reasoning_content) finalMsg.reasoning_content = msg.reasoning_content;
                             this.context.push(finalMsg);
-                            this.displayTokenUsage();
+                            console.log("");
                             break; // Exit tool loop
                         }
                     } catch (err) {
                         // Clear any partial line on error
                         process.stdout.write('\x1b[0m\x1b[K\n');
                         if (err.name === 'AbortError') {
-                            console.log('\n⚠️ Response interrupted.\n');
+                            console.log('\n⚠️  Response interrupted.\n');
                         } else {
                             console.error(`\n❌ API Error: ${err.message}\n`);
                         }
