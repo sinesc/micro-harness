@@ -4,6 +4,9 @@ import path from 'path';
 
 export class MessageContext {
 
+    messages;
+    forgottenFiles;
+
     static _getConfigDir() {
         return path.join(os.homedir(), '.config', 'micro-harness');
     }
@@ -16,6 +19,7 @@ export class MessageContext {
 
     constructor() {
         this.messages = [];
+        this.forgottenFiles = new Set();
 
         const cwd = process.cwd();
         this.contextFile = MessageContext._contextFilePath(cwd);
@@ -198,6 +202,13 @@ export class MessageContext {
         const filePath = args.path;
         const isFullRead = args.start_line === undefined && args.end_line === undefined;
 
+        // Skip read_file results for forgotten files
+        if (this.forgottenFiles.has(filePath)) {
+            processedIndices.add(callIndex);
+            processedIndices.add(resultIndex);
+            return;
+        }
+
         if (isFullRead) {
             if (fullFilesEncountered.has(filePath)) {
                 processedIndices.add(callIndex);
@@ -362,9 +373,10 @@ export class MessageContext {
         try {
             const data = await fs.readFile(this.contextFile, 'utf-8');
             const parsed = JSON.parse(data);
-            if (Array.isArray(parsed)) {
-                console.log(`📂 Loaded context (${parsed.length} messages)`);
-                this.messages = parsed;
+            if (Array.isArray(parsed.messages) && Array.isArray(parsed.forgottenFiles)) {
+                console.log(`📂 Loaded context (${parsed.messages.length} messages)`);
+                this.messages = parsed.messages;
+                this.forgottenFiles = new Set(parsed.forgottenFiles);
                 return parsed;
             }
         } catch (err) {
@@ -379,9 +391,10 @@ export class MessageContext {
     async save() {
         try {
             // Save only user/assistant/tool messages (skip system prompt)
-            const toSave = this.messages.filter(m => m.role !== 'system');
-            await fs.writeFile(this.contextFile, JSON.stringify(toSave, null, 2), 'utf-8');
-            console.log(`💾 Saved context (${toSave.length} messages)`);
+            const messages = this.messages.filter(m => m.role !== 'system');
+            const forgottenFiles = Array.from(this.forgottenFiles);
+            await fs.writeFile(this.contextFile, JSON.stringify({ messages, forgottenFiles }, null, 2), 'utf-8');
+            console.log(`💾 Saved context (${messages.length} messages)`);
         } catch (err) {
             console.log(`⚠️  Warning: Could not save context: ${err.message}`);
         }

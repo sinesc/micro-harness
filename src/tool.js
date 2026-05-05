@@ -85,11 +85,11 @@ export class Tool {
                         path: { type: 'string', description: 'File path' },
                         start_line: {
                             description: 'Start of the replacement range (1-indexed). Unless this is line 1 of the file, the first line of replacement must exactly match its current content.',
-                            oneOf: [{ type: 'integer' }, { type: 'string' }]
+                            type: 'integer',
                         },
                         end_line: {
                             description: 'End of the replacement range (1-indexed). Unless this is the last line of the file, the last line of replacement must exactly match its current content.',
-                            oneOf: [{ type: 'integer' }, { type: 'string' }]
+                            type: 'integer',
                         },
                         replacement: { type: 'string', description: 'New content for the range. Must begin with the exact text of start_line (leading anchor) and end with the exact text of end_line (trailing anchor), unless those lines are at the file boundary.' },
                         preview: { type: 'boolean', description: 'If true, return a preview of the edit without applying it. Returns a preview ID that can be passed to apply_preview to apply the edit.' }
@@ -109,6 +109,20 @@ export class Tool {
                         id: { type: 'string', description: '8-character preview ID returned by edit_file' }
                     },
                     required: ['id']
+                }
+            }
+        },
+        {
+            type: 'function',
+            function: {
+                name: 'forget_file',
+                description: 'Forget a file from the context. Read_file results for this file will be pruned from the prepared context.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        path: { type: 'string', description: 'File path to forget' }
+                    },
+                    required: ['path']
                 }
             }
         },
@@ -205,6 +219,17 @@ export class Tool {
             }
             this.fileChecksums.set(resolvedPath, this.#computeChecksum(content));
             this.filesDirtyAfterRead.delete(resolvedPath);
+
+            // Invalidate any pending previews for this file
+            for (const [id, preview] of this.pendingPreviews) {
+                if (preview.filePath === resolvedPath) {
+                    this.pendingPreviews.delete(id);
+                }
+            }
+
+            // Remove file from forgotten list so it can be read again
+            const relativePath = path.relative(process.cwd(), resolvedPath);
+            this.application.context.forgottenFiles.delete(relativePath);
 
             const lines = content.split(/\r?\n/);
             const totalLines = lines.length;
@@ -563,6 +588,13 @@ export class Tool {
         return text;
     }
 
+    forget_file({ path: filePath }) {
+        const resolvedPath = this._resolvePath(filePath);
+        const relativePath = path.relative(process.cwd(), resolvedPath);
+        this.application.context.forgottenFiles.add(relativePath);
+        return `You have removed '${filePath}' from context because you have completed your work with the file and do not need it anymore.`;
+    }
+
     // --- Helper functions ---
 
     /**
@@ -803,6 +835,7 @@ export class Tool {
                 case 'edit_file': return { result: await this.edit_file(args), error: false, toolName: name };
                 case 'apply_preview': return { result: await this.apply_preview(args), error: false, toolName: name };
                 case 'undo': return { result: await this.undo(), error: false, toolName: name };
+                case 'forget_file': return { result: await this.forget_file(args), error: false, toolName: name };
                 case 'search_files': return { result: await this.search_files(args), error: false, toolName: name };
                 case 'syntax_check': return { result: await this.syntax_check(args), error: false, toolName: name };
                 case 'calc': return { result: this.calc(args), error: false, toolName: name };
