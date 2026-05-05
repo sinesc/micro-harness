@@ -807,7 +807,6 @@ export class Tool {
                 case 'syntax_check': return { result: await this.syntax_check(args), error: false, toolName: name };
                 case 'calc': return { result: this.calc(args), error: false, toolName: name };
                 case 'todo': return { result: this.todo(args), error: false, toolName: name };
-                case 'read_stale': return { result: this.read_stale(args), error: false, toolName: name };
                 default: return { result: `Unknown tool: ${name}`, error: true, toolName: name };
             }
         } catch (err) {
