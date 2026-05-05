@@ -212,6 +212,18 @@ export class Tool {
     async read_file({ path: filePath, start_line, end_line }) {
         const resolvedPath = this._resolvePath(filePath);
         try {
+            const stats = await fs.stat(resolvedPath);
+            if (!stats.isFile()) {
+                throw new ToolError(`'${filePath}' is not a file.`);
+            }
+        } catch (err) {
+            if (err instanceof ToolError) throw err;
+            if (err.code === 'ENOENT') {
+                throw new ToolError(`File '${filePath}' does not exist.`);
+            }
+            throw new ToolError(`Cannot access file '${filePath}': ${err.message}`);
+        }
+        try {
             const content = await fs.readFile(resolvedPath, 'utf-8');
             // Reset offsets for this file since we re-read it
             if (this.fileOffsetMaps.has(resolvedPath)) {
@@ -403,6 +415,21 @@ export class Tool {
 
         // --- File read and checksum ---
         const resolvedPath = this._resolvePath(filePath);
+
+        // Check file existence before attempting to read
+        try {
+            const stats = await fs.stat(resolvedPath);
+            if (!stats.isFile()) {
+                throw new ToolError(`'${filePath}' is not a file.`);
+            }
+        } catch (err) {
+            if (err instanceof ToolError) throw err;
+            if (err.code === 'ENOENT') {
+                throw new ToolError(`File '${filePath}' does not exist. Create it first with create_file.`);
+            }
+            throw new ToolError(`Cannot access file '${filePath}': ${err.message}`);
+        }
+
         const fileContent = await fs.readFile(resolvedPath, 'utf-8');
 
         const previousChecksum = this.fileChecksums.get(resolvedPath);
