@@ -161,13 +161,18 @@ export class Application {
         }
     }
 
+    formatSpan(content) {
+        // Basic markdown rendering: **bold** and *italic* // TODO look into util.styleText()
+        content = content.replace(/\*\*(.*?)\*\*/g, '\x1b[1m$1\x1b[22m'); // bold
+        content = content.replace(/\*(.*?)\*/g, '\x1b[3m$1\x1b[23m'); // italic
+        return content;
+    }
+
     displayMessage(role, content, color = null) {
         content = (content || '').trim();
         if (content === '') return;
 
-        // Basic markdown rendering: **bold** and *italic* // TODO look into util.styleText()
-        content = content.replace(/\*\*(.*?)\*\*/g, '\x1b[1m$1\x1b[22m'); // bold
-        content = content.replace(/\*(.*?)\*/g, '\x1b[3m$1\x1b[23m'); // italic
+        content = this.formatSpan(content);
 
         const typeLabel = {
             system: '🤖',
@@ -193,8 +198,10 @@ export class Application {
      * Uses \r to update the current line in-place, flushing on newlines.
      * Returns the accumulated content built from all chunks.
      */
-    displayMessageChunk(role, chunk, isFirst, isLast, color = null) {
+    displayMessageChunk(role, chunk, isFirst, isLast, color = null) { // TODO isLast+color never used, role always assistant
         if (!chunk || chunk.length === 0) return;
+
+        chunk = this.formatSpan(chunk);
 
         const typeLabel = {
             system: '🤖',
@@ -257,6 +264,44 @@ export class Application {
         let firstContentChunk = true;
         let bufferedLeading = '';
         let bufferedTrailing = '';
+        let bufferedMarkdown = { isFirst: null, content: null };
+
+        const displayMessageChunk = (part, isFirst) => {
+            // start buffering when encountering potential markdown
+            if (bufferedMarkdown.content !== null) {
+                bufferedMarkdown.content += part;
+            } else if (part.includes('*')) {
+                bufferedMarkdown.isFirst = isFirst;
+                bufferedMarkdown.content = part;
+            }
+
+            // buffer until complete bold/italic spans or output directly
+            if (bufferedMarkdown.content !== null) {
+                const start = bufferedMarkdown.content.indexOf('*');
+                const type = bufferedMarkdown.content.slice(start, 2) === '**' ? '**' : '*';
+                let end = bufferedMarkdown.content.slice(start + type.length).lastIndexOf(type);
+                end = end > -1 ? end + start + type.length : -1;
+                const potentialMatch = end > -1 ? bufferedMarkdown.content.slice(start, end + type.length) : null;
+                if (potentialMatch !== null && potentialMatch !== '**') { // ** when last chunk ended on * and new current started with *
+                    const before = bufferedMarkdown.content.slice(0, start);
+                    const match = potentialMatch;
+                    this.displayMessageChunk('assistant', before + match, bufferedMarkdown.isFirst, false);
+                    const remainder = bufferedMarkdown.content.slice(end + type.length);
+                    if (remainder.includes('*')) {
+                        bufferedMarkdown.content = remainder;
+                        bufferedMarkdown.isFirst = false;
+                    } else {
+                        bufferedMarkdown.content = null;
+                        bufferedMarkdown.isFirst = null;
+                        if (remainder.length > 0) {
+                            this.displayMessageChunk('assistant', remainder, false, false);
+                        }
+                    }
+                }
+            } else {
+                this.displayMessageChunk('assistant', part, isFirst, false);
+            }
+        };
 
         for await (const chunk of this.fetchCompletionStream(messagesToSend, this.abortController.signal)) {
             const delta = chunk.choices?.[0]?.delta;
@@ -268,7 +313,7 @@ export class Application {
                     bufferedLeading += delta.content;
                     const trimmedStart = bufferedLeading.trimStart();
                     if (trimmedStart.length > 0) {
-                        this.displayMessageChunk('assistant', trimmedStart, true, false);
+                        displayMessageChunk(trimmedStart, true);
                         firstContentChunk = false;
                         bufferedLeading = '';
                     }
@@ -276,7 +321,7 @@ export class Application {
                     bufferedTrailing += delta.content;
                     const trimmedEnd = bufferedTrailing.trimEnd();
                     if (trimmedEnd.length > 0) {
-                        this.displayMessageChunk('assistant', trimmedEnd, false, false);
+                        displayMessageChunk(trimmedEnd, false);
                         bufferedTrailing = '';
                     }
                 }
@@ -299,6 +344,10 @@ export class Application {
                     if (tcDelta.function?.arguments) tc.function.arguments += tcDelta.function.arguments;
                 }
             }
+        }
+
+        if (bufferedMarkdown.content !== null) {
+            this.displayMessageChunk('assistant', bufferedMarkdown.content, bufferedMarkdown.isFirst, false);
         }
 
         if (!firstContentChunk) {
