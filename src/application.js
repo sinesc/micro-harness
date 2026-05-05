@@ -256,6 +256,7 @@ export class Application {
         const toolCallsMap = new Map();
         let firstContentChunk = true;
         let bufferedLeading = '';
+        let bufferedTrailing = '';
 
         for await (const chunk of this.fetchCompletionStream(messagesToSend, this.abortController.signal)) {
             const delta = chunk.choices?.[0]?.delta;
@@ -272,7 +273,12 @@ export class Application {
                         bufferedLeading = '';
                     }
                 } else {
-                    this.displayMessageChunk('assistant', delta.content, false, false);
+                    bufferedTrailing += delta.content;
+                    const trimmedEnd = bufferedTrailing.trimEnd();
+                    if (trimmedEnd.length > 0) {
+                        this.displayMessageChunk('assistant', trimmedEnd, false, false);
+                        bufferedTrailing = '';
+                    }
                 }
             }
 
@@ -324,6 +330,9 @@ export class Application {
         }
 
         if (msg.tool_calls?.length) {
+            if (msg.content?.trim().length > 0) {
+                console.log("");
+            }
             await this.handleToolCalls(msg, messagesToSend);
             return true;
         }
