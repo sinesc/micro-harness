@@ -315,7 +315,7 @@ export class MessageContext {
 
         // Skip if before last user msg AND file fully read since
         if (editResultIndex !== undefined && userMessageEncountered) {
-            const editCallMsg = messages[editResultIndex - 1];
+            const editCallMsg = messages[editResultIndex - 1]; // FIXME: assumes the tool result is immediately after the assistant call - may not hold if there are interleaved messages.
             const editTc = editCallMsg.tool_calls?.find(tc => {
                 const a = this._parseArgs(tc.function.arguments);
                 return a.preview === true;

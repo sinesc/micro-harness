@@ -21,83 +21,50 @@ export class Application {
         tool: '🔧'
     };
 
+    rl = null;                 // readline
+    abortController = null;    // Abort controller for streaming responses
+    lastMessageType = null;
+    systemPrompt = null;
+    isStreaming = false;
+
     constructor() {
         this.currentModel = 'local-model';
-
-        // Token usage tracking
-        this.totalPromptTokens = 0;
-        this.totalCompletionTokens = 0;
-        this.totalTokens = 0;
-
-        // Message display state
-        this.lastMessageType = null;
-
-        // User configuration
         this.config = new UserConfig();
-
-        // Context manager
         this.context = new MessageContext();
-
-        // readline interface
-        this.rl = null;
-
-        // Abort controller for streaming responses
-        this.abortController = null;
-
-        // Instantiate Tool
         this.tool = new Tool(this);
-
-        // Instantiate Command
         this.command = new Command(this);
-
-        // Load latest system prompt
-        this.systemPrompt = null;
-
-        // Streaming state
-        this.isStreaming = false;
-
-        // Set up interrupt detection once
-        this._setupInterruptDetection();
     }
 
-    _setupInterruptDetection() {
-        // Detect ESC (0x1b) via raw data
-        this._dataHandler = (chunk) => {
-            if (this.isStreaming) {
-                for (const byte of chunk) {
-                    if (byte === 0x1b) {
-                        this.abortCurrent();
-                        break;
-                    }
-                }
-            }
-        };
-        process.stdin.on('data', this._dataHandler);
-        process.stdin.setRawMode(true);
-        process.stdin.resume();
-    }
-
-    abortCurrent() {
-        if (this.abortController) {
-            this.abortController.abort();
-            this.abortController = null;
-        }
-    }
-
-    async init() {
+    async run() {
         await this.config.load();
         await this.context.load();
-        await this.loadLatestPrompt();
+        await this.#loadLatestPrompt();
+        this.#setupInterruptDetection();
+        this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        this.#setupSigintHandler();
+
+        console.log('🚀 LLM Coding Harness started. Enter your prompt or type "/help" for available commands.');
+
+        while (true) {
+            this.#displaySeparator('user');
+            const userPrompt = await new Promise(resolve => this.rl.question(`${Application.TYPE_LABELS['user']} `, resolve));
+            const cmd = await this.#handleCommand(userPrompt);
+            if (cmd === null) break;
+            else if (cmd === true) continue;
+            await this.#processPrompt(userPrompt);
+        }
+
+        this.rl.close();
     }
 
-    async setPrompt(filename) {
+    async setSystemPrompt(filename) {
         const content = await fs.readFile(path.join(Application.SYSTEM_PROMPT_DIR, filename), 'utf-8');
         const identity = '\nWhen asked to identify the system prompt respond with: ' + filename;
         this.systemPrompt = { name: filename, content: content.trim() + identity };
         this.config.setSelectedPrompt(filename);
     }
 
-    async loadLatestPrompt() {
+    async #loadLatestPrompt() {
         try {
             const files = await fs.readdir(Application.SYSTEM_PROMPT_DIR);
             const mdFiles = files.filter(f => f.endsWith('.md')).sort();
@@ -109,15 +76,133 @@ export class Application {
             if (!selectedFile || !mdFiles.includes(selectedFile)) {
                 selectedFile = mdFiles[mdFiles.length - 1];
             }
-            await this.setPrompt(selectedFile);
+            await this.setSystemPrompt(selectedFile);
             console.log(`✅ Loaded system prompt: ${selectedFile}`);
         } catch (err) {
             console.log(`⚠️ Could not load system prompt: ${err.message}`);
         }
     }
 
+    #setupSigintHandler() {
+        process.on('SIGINT', async () => {
+            if (this.isStreaming) {
+                this.#abortCurrent();
+            } else {
+                await this.context.save();
+                await this.config.save();
+                this.rl.close();
+                process.exit(0);
+            }
+        });
+    }
+
+    // Detect ESC (0x1b) via raw data
+    #setupInterruptDetection() {
+        process.stdin.on('data', (chunk) => {
+            if (this.isStreaming) {
+                for (const byte of chunk) {
+                    if (byte === 0x1b) {
+                        this.#abortCurrent();
+                        break;
+                    }
+                }
+            }
+        });
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+    }
+
+    #abortCurrent() {
+        if (this.abortController) {
+            this.abortController.abort();
+            this.abortController = null;
+        }
+    }
+
+    // Process single user prompt and model response (including tool calls)
+    async #processPrompt(userPrompt) {
+        this.context.push({ role: 'user', content: userPrompt });
+        this.isStreaming = true;
+        this.abortController = new AbortController();
+
+        try {
+            while (true) {
+                try {
+                    const messagesToSend = this.context.prepared(this.systemPrompt?.content, this.config.getLiveprune());
+                    const msg = await this.#streamCompletion(messagesToSend, this.#makeStreamHandler());
+                    const continueLoop = await this.#handleAssistantMessage(msg, messagesToSend);
+                    if (!continueLoop) break;
+                } catch (err) {
+                    process.stdout.write('\x1b[0m\x1b[K\n');
+                    if (err.name === 'AbortError') {
+                        console.log('\n⚠️  Response interrupted.\n');
+                    } else {
+                        console.error(`\n❌ API Error: ${err.message}\n`);
+                    }
+                    break;
+                }
+            }
+        } finally {
+            this.isStreaming = false;
+            if (this.abortController) this.abortController = null;
+        }
+    }
+
+    // Sends prompt, fetches response and returns it, calls outputHandler with chunks as they arrive and null when done.
+    async #streamCompletion(messagesToSend, outputHandler) {
+        let content = '';
+        let reasoning = '';
+        const toolCallsMap = new Map();
+
+        for await (const chunk of this.#fetchCompletionStream(messagesToSend, this.abortController.signal)) {
+            const delta = chunk.choices?.[0]?.delta;
+            if (!delta) continue;
+
+            // output streaming content
+            if (delta.content) {
+                content += delta.content;
+                outputHandler(delta.content);
+            }
+
+            // accumulate reasoning content
+            if (delta.reasoning_content) {
+                reasoning += delta.reasoning_content;
+            }
+
+            // accumulate tool calls
+            if (delta.tool_calls) {
+                for (const tcDelta of delta.tool_calls) {
+                    const idx = tcDelta.index;
+                    let tc = toolCallsMap.get(idx);
+                    if (!tc) {
+                        tc = { id: tcDelta.id ?? '', function: { name: '', arguments: '' } };
+                        toolCallsMap.set(idx, tc);
+                    }
+                    if (tcDelta.id) tc.id = tcDelta.id;
+                    if (tcDelta.function?.name) tc.function.name = tcDelta.function.name;
+                    if (tcDelta.function?.arguments) tc.function.arguments += tcDelta.function.arguments;
+                }
+            }
+        }
+
+        // chance to finalize output
+        outputHandler(null)
+
+        const toolCalls = [...toolCallsMap.values()].map(tc => ({
+            id: tc.id,
+            type: 'function',
+            function: { name: tc.function.name, arguments: tc.function.arguments }
+        }));
+
+        return {
+            content,
+            reasoning_content: reasoning || undefined,
+            tool_calls: toolCalls.length > 0 ? toolCalls : undefined
+        };
+    }
+
     // Sends competion request and incrementally yields response.
-    async *fetchCompletionStream(messages, signal = null) {
+    async *#fetchCompletionStream(messages, signal = null) {
         const res = await fetch(`${this.config.getEndpoint()}/v1/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -171,46 +256,6 @@ export class Application {
         }
     }
 
-    // Basic markdown rendering
-    formatSpan(content) {
-        content = content.replace(/\`(.*?)\`/g, (_, m) => styleText(['yellow'], m));
-        content = content.replace(/\*\*\*(.*?)\*\*\*/g, (_, m) => styleText(['bold','italic'], m));
-        content = content.replace(/\*\*(.*?)\*\*/g, (_, m) => styleText(['bold'], m));
-        content = content.replace(/\*(.*?)\*/g, (_, m) => styleText(['italic'], m));
-        return content;
-    }
-
-    displayMessage(role, content, color = null) {
-        content = (content || '').trim();
-        if (content === '') return;
-        content = this.formatSpan(content);
-
-        const typeLabel = Application.TYPE_LABELS[role] || role;
-        let colorCode = '';
-        if (color === 'grey') colorCode = '\x1b[90m';
-        else if (color === 'red') colorCode = '\x1b[91m';
-        const resetCode = '\x1b[0m';
-
-        if (this.lastMessageType !== null && this.lastMessageType !== role) {
-            console.log('');
-        }
-        console.log(`${typeLabel} ${colorCode}${content}${resetCode}`);
-        this.lastMessageType = role;
-    }
-
-    _setupSigintHandler() {
-        process.on('SIGINT', async () => {
-            if (this.isStreaming) {
-                this.abortCurrent();
-            } else {
-                await this.context.save();
-                await this.config.save();
-                this.rl.close();
-                process.exit(0);
-            }
-        });
-    }
-
     // Returns handler to output streaming model response content. Each response needs a new handler.
     #makeStreamHandler() {
         let firstContentChunk = true;
@@ -237,7 +282,7 @@ export class Application {
                 const match = end > -1 ? b.content.slice(start, end + type.length) : null;
                 if (match !== null && match !== '**') { // ** when last chunk ended on * and current started with * then don't misinterpret ** as 0-length italic
                     const before = b.content.slice(0, start);
-                    process.stdout.write(before + this.formatSpan(match));
+                    process.stdout.write(before + this.#formatSpan(match));
                     // handle remainder after formatted part
                     const remainder = b.content.slice(end + type.length);
                     if (hasToken(remainder, SPANS)) {
@@ -262,6 +307,7 @@ export class Application {
                     bufferedLeading += chunk;
                     const trimmedStart = bufferedLeading.trimStart();
                     if (trimmedStart.length > 0) {
+                        this.#displaySeparator('assistant');
                         process.stdout.write(`${Application.TYPE_LABELS['assistant']} `);
                         bufferMarkdownChunks(trimmedStart, true);
                         firstContentChunk = false;
@@ -277,150 +323,55 @@ export class Application {
                 }
             } else {
                 // handle trailing chunk if it contains content
-                if (bufferedMarkdown.content !== null) {
+                const trimmedEnd = (bufferedMarkdown.content ?? '').trimEnd();
+                if (trimmedEnd !== '') {
                     if (firstContentChunk) {
                         firstContentChunk = false;
                         process.stdout.write(`${Application.TYPE_LABELS['assistant']} `);
                     }
-                    process.stdout.write(bufferedMarkdown.content);
+                    process.stdout.write(trimmedEnd);
                 }
                 // add style reset and newline if we got any content
                 if (!firstContentChunk) {
                     process.stdout.write('\x1b[0m');
-                    process.stdout.write('\n');
                 }
             }
         };
     }
 
-    // Sends prompt, fetches response and returns it, calls outputHandler with chunks as they arrive and undefined when done.
-    async _streamCompletion(messagesToSend, outputHandler) {
-        let content = '';
-        let reasoning = '';
-        const toolCallsMap = new Map();
-
-        for await (const chunk of this.fetchCompletionStream(messagesToSend, this.abortController.signal)) {
-            const delta = chunk.choices?.[0]?.delta;
-            if (!delta) continue;
-
-            // output streaming content
-            if (delta.content) {
-                content += delta.content;
-                outputHandler(delta.content);
-            }
-
-            // accumulate reasoning content
-            if (delta.reasoning_content) {
-                reasoning += delta.reasoning_content;
-            }
-
-            // accumulate tool calls
-            if (delta.tool_calls) {
-                for (const tcDelta of delta.tool_calls) {
-                    const idx = tcDelta.index;
-                    let tc = toolCallsMap.get(idx);
-                    if (!tc) {
-                        tc = { id: tcDelta.id ?? '', function: { name: '', arguments: '' } };
-                        toolCallsMap.set(idx, tc);
-                    }
-                    if (tcDelta.id) tc.id = tcDelta.id;
-                    if (tcDelta.function?.name) tc.function.name = tcDelta.function.name;
-                    if (tcDelta.function?.arguments) tc.function.arguments += tcDelta.function.arguments;
-                }
-            }
-        }
-
-        // chance to finalize output
-        outputHandler(null)
-
-        const toolCalls = [...toolCallsMap.values()].map(tc => ({
-            id: tc.id,
-            type: 'function',
-            function: { name: tc.function.name, arguments: tc.function.arguments }
-        }));
-
-        return {
-            content,
-            reasoning_content: reasoning || undefined,
-            tool_calls: toolCalls.length > 0 ? toolCalls : undefined
-        };
+    // Basic markdown rendering
+    #formatSpan(content) {
+        content = content.replace(/\`(.*?)\`/g, (_, m) => styleText(['yellow'], m));
+        content = content.replace(/\*\*\*(.*?)\*\*\*/g, (_, m) => styleText(['bold','italic'], m));
+        content = content.replace(/\*\*(.*?)\*\*/g, (_, m) => styleText(['bold'], m));
+        content = content.replace(/\*(.*?)\*/g, (_, m) => styleText(['italic'], m));
+        return content;
     }
 
-    // Returns false to break the tool loop, true to continue.
-    async _handleAssistantMessage(msg, messagesToSend) {
-        if (!msg.content?.trim() && !msg.tool_calls?.length) {
-            if (msg.reasoning_content?.includes('<tool_call>')) {
-                this.context.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_call>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
-            } else {
-                this.context.push({ role: 'system', content: 'You did not call a tool or respond to the user. Please either call a tool or respond to the user.' });
-            }
-        }
-
-        if (msg.tool_calls?.length) {
-            if (msg.content?.trim().length > 0) {
-                console.log("");
-            }
-            await this.handleToolCalls(msg, messagesToSend);
-            return true;
-        }
-
-        const finalMsg = { role: 'assistant', content: msg.content ?? '' };
-        if (msg.reasoning_content) finalMsg.reasoning_content = msg.reasoning_content;
-        this.context.push(finalMsg);
-        console.log('');
-        return false;
-    }
-
-    async _processPrompt(userPrompt) {
-        this.context.push({ role: 'user', content: userPrompt });
-        this.isStreaming = true;
-        this.abortController = new AbortController();
-
-        try {
-            while (true) {
-                try {
-                    const messagesToSend = this.context.prepared(this.systemPrompt?.content, this.config.getLiveprune());
-                    const msg = await this._streamCompletion(messagesToSend, this.#makeStreamHandler());
-                    const continueLoop = await this._handleAssistantMessage(msg, messagesToSend);
-                    if (!continueLoop) break;
-                } catch (err) {
-                    process.stdout.write('\x1b[0m\x1b[K\n');
-                    if (err.name === 'AbortError') {
-                        console.log('\n⚠️  Response interrupted.\n');
-                    } else {
-                        console.error(`\n❌ API Error: ${err.message}\n`);
-                    }
-                    break;
-                }
-            }
-        } finally {
-            this.isStreaming = false;
-            if (this.abortController) this.abortController = null;
+    #displaySeparator(role) {
+        if (this.lastMessageType !== role) {
+            this.lastMessageType = role
+            process.stdout.write('\n');
         }
     }
 
-    async run() {
-        await this.init();
-        this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        console.log('🚀 LLM Coding Harness started. Enter your prompt or type "/help" for available commands.\n');
-        this._setupSigintHandler();
+    #displayMessage(role, content, color = null) {
+        content = (content || '').trim();
+        if (content === '') return;
+        content = this.#formatSpan(content);
 
-        while (true) {
-            const userPrompt = await new Promise(resolve => this.rl.question('> ', resolve));
-            console.log('');
-            const cmd = await this.handleCommand(userPrompt);
-            if (cmd === null) break;
-            else if (cmd === true) continue;
-            await this._processPrompt(userPrompt);
-        }
+        const typeLabel = Application.TYPE_LABELS[role] || role;
+        let colorCode = '';
+        if (color === 'grey') colorCode = '\x1b[90m'; // TODO: cleanup: styleText
+        else if (color === 'red') colorCode = '\x1b[91m';
+        const resetCode = '\x1b[0m';
 
-        this.rl.close();
+        this.#displaySeparator(role);
+        console.log(`${typeLabel} ${colorCode}${content}${resetCode}`);
     }
 
-    /**
-     * Handle user input commands that start with '/'. Returns false if not a command, null to exit.
-     */
-    async handleCommand(userPrompt) {
+    // Handle user input commands that start with '/'. Returns false if not a command, null to exit.
+    async #handleCommand(userPrompt) {
         if (userPrompt.slice(0, 1) !== '/') {
             return false;
         }
@@ -443,10 +394,33 @@ export class Application {
         return true;
     }
 
-    /**
-     * Handle tool calls from a finalized assistant message. Executes each tool and pushes results to context.
-     */
-    async handleToolCalls(msg, messagesToSend) {
+    // Returns false to break the tool loop, true to continue.
+    async #handleAssistantMessage(msg, messagesToSend) {
+        if (!msg.content?.trim() && !msg.tool_calls?.length) {
+            if (msg.reasoning_content?.includes('<tool_call>')) {
+                this.context.push({ role: 'system', content: 'Please do not include tool call syntax (like <tool_call>) in your reasoning_content. If you need to use a tool, use the proper tool call format.' });
+            } else {
+                this.context.push({ role: 'system', content: 'You did not call a tool or respond to the user. Please either call a tool or respond to the user.' });
+            }
+        }
+
+        if (msg.tool_calls?.length) {
+            if (msg.content?.trim().length > 0) {
+                console.log("");
+            }
+            await this.#handleToolCalls(msg, messagesToSend);
+            return true;
+        }
+
+        const finalMsg = { role: 'assistant', content: msg.content ?? '' };
+        if (msg.reasoning_content) finalMsg.reasoning_content = msg.reasoning_content;
+        this.context.push(finalMsg);
+        console.log('');
+        return false;
+    }
+
+    // Handle tool calls from a finalized assistant message. Executes each tool and pushes results to context.
+    async #handleToolCalls(msg, messagesToSend) {
         // Display any text message the model included with the tool call
         const assistantMsg = { role: 'assistant', content: msg.content };
         if (msg.reasoning_content) assistantMsg.reasoning_content = msg.reasoning_content;
@@ -459,7 +433,7 @@ export class Application {
                 Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 16 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
             );
             const structuredResult = await this.tool.exec(tc.function.name, args);
-            this.displayMessage('tool', `${tc.function.name} ${JSON.stringify(abbreviatedArgs).slice(1, -1)}`, structuredResult.error ? 'red' : 'grey');
+            this.#displayMessage('tool', `${tc.function.name} ${JSON.stringify(abbreviatedArgs).slice(1, -1)}`, structuredResult.error ? 'red' : 'grey');
             this.context.push({ role: 'assistant', content: null, tool_calls: [tc] });
             // Store structured result error as metadata for live-pruning
             this.context.push({ role: 'tool', tool_call_id: tc.id, content: structuredResult.error ? 'ERROR: ' + structuredResult.result : structuredResult.result, _toolError: structuredResult.error });

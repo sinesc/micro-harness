@@ -167,7 +167,7 @@ export class Command {
                 throw new CommandError(`Invalid prompt index or name. Use /prompt to see available options.`);
             }
 
-            await this.application.setPrompt(selectedFile);
+            await this.application.setSystemPrompt(selectedFile);
             return `✅ Switched to system prompt: ${selectedFile}`;
         } catch (err) {
             if (err instanceof CommandError) throw err;
