@@ -1,16 +1,25 @@
 import readline from 'readline';
 import fs from 'fs/promises';
 import path from 'path';
+import { styleText } from 'util';
 import { fileURLToPath } from 'url';
 import { Tool } from './tool.js';
 import { Command } from './command.js';
 import { MessageContext } from './message-context.js';
 import { UserConfig } from './config.js';
+import { matchToken, hasToken } from './common.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export class Application {
     static SYSTEM_PROMPT_DIR = path.resolve(__dirname, '..', 'config', 'system');
+
+    static TYPE_LABELS = {
+        system: '🤖',
+        user: '👤',
+        assistant: '🤖',
+        tool: '🔧'
+    };
 
     constructor() {
         this.currentModel = 'local-model';
@@ -107,6 +116,7 @@ export class Application {
         }
     }
 
+    // Sends competion request and incrementally yields response.
     async *fetchCompletionStream(messages, signal = null) {
         const res = await fetch(`${this.config.getEndpoint()}/v1/chat/completions`, {
             method: 'POST',
@@ -161,26 +171,21 @@ export class Application {
         }
     }
 
+    // Basic markdown rendering
     formatSpan(content) {
-        // Basic markdown rendering: **bold** and *italic* // TODO look into util.styleText()
-        content = content.replace(/\*\*(.*?)\*\*/g, '\x1b[1m$1\x1b[22m'); // bold
-        content = content.replace(/\*(.*?)\*/g, '\x1b[3m$1\x1b[23m'); // italic
+        content = content.replace(/\`(.*?)\`/g, (_, m) => styleText(['yellow'], m));
+        content = content.replace(/\*\*\*(.*?)\*\*\*/g, (_, m) => styleText(['bold','italic'], m));
+        content = content.replace(/\*\*(.*?)\*\*/g, (_, m) => styleText(['bold'], m));
+        content = content.replace(/\*(.*?)\*/g, (_, m) => styleText(['italic'], m));
         return content;
     }
 
     displayMessage(role, content, color = null) {
         content = (content || '').trim();
         if (content === '') return;
-
         content = this.formatSpan(content);
 
-        const typeLabel = {
-            system: '🤖',
-            user: '👤',
-            assistant: '🤖',
-            tool: '🔧'
-        }[role] || role;
-
+        const typeLabel = Application.TYPE_LABELS[role] || role;
         let colorCode = '';
         if (color === 'grey') colorCode = '\x1b[90m';
         else if (color === 'red') colorCode = '\x1b[91m';
@@ -191,57 +196,6 @@ export class Application {
         }
         console.log(`${typeLabel} ${colorCode}${content}${resetCode}`);
         this.lastMessageType = role;
-    }
-
-    /**
-     * Display a streaming chunk progressively.
-     * Uses \r to update the current line in-place, flushing on newlines.
-     * Returns the accumulated content built from all chunks.
-     */
-    displayMessageChunk(role, chunk, isFirst, isLast, color = null) { // TODO isLast+color never used, role always assistant
-        if (!chunk || chunk.length === 0) return;
-
-        chunk = this.formatSpan(chunk);
-
-        const typeLabel = {
-            system: '🤖',
-            user: '👤',
-            assistant: '🤖',
-            tool: '🔧'
-        }[role] || role;
-
-        let colorCode = '';
-        if (color === 'grey') colorCode = '\x1b[90m';
-        else if (color === 'red') colorCode = '\x1b[91m';
-        const resetCode = '\x1b[0m';
-
-        // On first chunk, print the type label prefix
-        if (isFirst) {
-            if (this.lastMessageType !== null && this.lastMessageType !== role) {
-                process.stdout.write('\n');
-            }
-            process.stdout.write(`${typeLabel} ${colorCode}`);
-            this.lastMessageType = role;
-        }
-
-        // Split chunk by newlines for progressive display
-        const parts = chunk.split('\n');
-        for (let i = 0; i < parts.length; i++) {
-            const part = parts[i];
-            if (i < parts.length - 1) {
-                // Not the last part: print with newline and reset
-                process.stdout.write(`${part}${resetCode}\n${colorCode}`);
-            } else if (isLast) {
-                // Final part of final chunk: commit with newline and reset
-                process.stdout.write(`${part}${resetCode}\n`);
-            } else {
-                // Last part but not final chunk: use \r for in-place update
-                // Clear to end of line first, then rewrite
-                process.stdout.write('\x1b[K');
-                process.stdout.write(part);
-            }
-        }
-        process.stdout.flush?.();
     }
 
     _setupSigintHandler() {
@@ -257,80 +211,110 @@ export class Application {
         });
     }
 
-    async _streamCompletion(messagesToSend) {
-        let content = '';
-        let reasoning = '';
-        const toolCallsMap = new Map();
+    // Returns handler to output streaming model response content. Each response needs a new handler.
+    #makeStreamHandler() {
         let firstContentChunk = true;
         let bufferedLeading = '';
         let bufferedTrailing = '';
-        let bufferedMarkdown = { isFirst: null, content: null };
+        let bufferedMarkdown = { content: null };
 
-        const displayMessageChunk = (part, isFirst) => {
-            // start buffering when encountering potential markdown
-            if (bufferedMarkdown.content !== null) {
-                bufferedMarkdown.content += part;
-            } else if (part.includes('*')) {
-                bufferedMarkdown.isFirst = isFirst;
-                bufferedMarkdown.content = part;
+        const bufferMarkdownChunks = (part) => {
+            const b = bufferedMarkdown;
+            const SPANS = [ '`', '***', '**', '*' ]; // buffered until complete
+
+            // start buffering when encountering potential span
+            if (b.content !== null) {
+                b.content += part;
+            } else if (hasToken(part, SPANS)) {
+                b.content = part;
             }
 
             // buffer until complete bold/italic spans or output directly
-            if (bufferedMarkdown.content !== null) {
-                const start = bufferedMarkdown.content.indexOf('*');
-                const type = bufferedMarkdown.content.slice(start, 2) === '**' ? '**' : '*';
-                let end = bufferedMarkdown.content.slice(start + type.length).lastIndexOf(type);
+            if (b.content !== null) {
+                const { pos: start, token: type } = matchToken(b.content, SPANS);
+                let end = b.content.slice(start + type.length).lastIndexOf(type);
                 end = end > -1 ? end + start + type.length : -1;
-                const potentialMatch = end > -1 ? bufferedMarkdown.content.slice(start, end + type.length) : null;
-                if (potentialMatch !== null && potentialMatch !== '**') { // ** when last chunk ended on * and new current started with *
-                    const before = bufferedMarkdown.content.slice(0, start);
-                    const match = potentialMatch;
-                    this.displayMessageChunk('assistant', before + match, bufferedMarkdown.isFirst, false);
-                    const remainder = bufferedMarkdown.content.slice(end + type.length);
-                    if (remainder.includes('*')) {
-                        bufferedMarkdown.content = remainder;
-                        bufferedMarkdown.isFirst = false;
+                const match = end > -1 ? b.content.slice(start, end + type.length) : null;
+                if (match !== null && match !== '**') { // ** when last chunk ended on * and current started with * then don't misinterpret ** as 0-length italic
+                    const before = b.content.slice(0, start);
+                    process.stdout.write(before + this.formatSpan(match));
+                    // handle remainder after formatted part
+                    const remainder = b.content.slice(end + type.length);
+                    if (hasToken(remainder, SPANS)) {
+                        b.content = remainder;
                     } else {
-                        bufferedMarkdown.content = null;
-                        bufferedMarkdown.isFirst = null;
+                        b.content = null;
                         if (remainder.length > 0) {
-                            this.displayMessageChunk('assistant', remainder, false, false);
+                            process.stdout.write(remainder);
                         }
                     }
                 }
             } else {
-                this.displayMessageChunk('assistant', part, isFirst, false);
+                process.stdout.write(part);
+            }
+            process.stdout.flush?.();
+        };
+
+        return (chunk) => {
+            if (chunk !== null) {
+                // handle message chunks
+                if (firstContentChunk) {
+                    bufferedLeading += chunk;
+                    const trimmedStart = bufferedLeading.trimStart();
+                    if (trimmedStart.length > 0) {
+                        process.stdout.write(`${Application.TYPE_LABELS['assistant']} `);
+                        bufferMarkdownChunks(trimmedStart, true);
+                        firstContentChunk = false;
+                        bufferedLeading = '';
+                    }
+                } else {
+                    bufferedTrailing += chunk;
+                    const trimmedEnd = bufferedTrailing.trimEnd();
+                    if (trimmedEnd.length > 0) {
+                        bufferMarkdownChunks(trimmedEnd, false);
+                        bufferedTrailing = '';
+                    }
+                }
+            } else {
+                // handle trailing chunk if it contains content
+                if (bufferedMarkdown.content !== null) {
+                    if (firstContentChunk) {
+                        firstContentChunk = false;
+                        process.stdout.write(`${Application.TYPE_LABELS['assistant']} `);
+                    }
+                    process.stdout.write(bufferedMarkdown.content);
+                }
+                // add style reset and newline if we got any content
+                if (!firstContentChunk) {
+                    process.stdout.write('\x1b[0m');
+                    process.stdout.write('\n');
+                }
             }
         };
+    }
+
+    // Sends prompt, fetches response and returns it, calls outputHandler with chunks as they arrive and undefined when done.
+    async _streamCompletion(messagesToSend, outputHandler) {
+        let content = '';
+        let reasoning = '';
+        const toolCallsMap = new Map();
 
         for await (const chunk of this.fetchCompletionStream(messagesToSend, this.abortController.signal)) {
             const delta = chunk.choices?.[0]?.delta;
             if (!delta) continue;
 
+            // output streaming content
             if (delta.content) {
                 content += delta.content;
-                if (firstContentChunk) {
-                    bufferedLeading += delta.content;
-                    const trimmedStart = bufferedLeading.trimStart();
-                    if (trimmedStart.length > 0) {
-                        displayMessageChunk(trimmedStart, true);
-                        firstContentChunk = false;
-                        bufferedLeading = '';
-                    }
-                } else {
-                    bufferedTrailing += delta.content;
-                    const trimmedEnd = bufferedTrailing.trimEnd();
-                    if (trimmedEnd.length > 0) {
-                        displayMessageChunk(trimmedEnd, false);
-                        bufferedTrailing = '';
-                    }
-                }
+                outputHandler(delta.content);
             }
 
+            // accumulate reasoning content
             if (delta.reasoning_content) {
                 reasoning += delta.reasoning_content;
             }
 
+            // accumulate tool calls
             if (delta.tool_calls) {
                 for (const tcDelta of delta.tool_calls) {
                     const idx = tcDelta.index;
@@ -346,14 +330,8 @@ export class Application {
             }
         }
 
-        if (bufferedMarkdown.content !== null) {
-            this.displayMessageChunk('assistant', bufferedMarkdown.content, bufferedMarkdown.isFirst, false);
-        }
-
-        if (!firstContentChunk) {
-            process.stdout.write('\x1b[0m');
-            if (!content.endsWith('\n')) process.stdout.write('\n');
-        }
+        // chance to finalize output
+        outputHandler(null)
 
         const toolCalls = [...toolCallsMap.values()].map(tc => ({
             id: tc.id,
@@ -402,7 +380,7 @@ export class Application {
             while (true) {
                 try {
                     const messagesToSend = this.context.prepared(this.systemPrompt?.content, this.config.getLiveprune());
-                    const msg = await this._streamCompletion(messagesToSend);
+                    const msg = await this._streamCompletion(messagesToSend, this.#makeStreamHandler());
                     const continueLoop = await this._handleAssistantMessage(msg, messagesToSend);
                     if (!continueLoop) break;
                 } catch (err) {
