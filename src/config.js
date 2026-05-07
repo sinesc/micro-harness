@@ -7,7 +7,7 @@ export class UserConfig {
     static CONFIG_FILE = path.join(UserConfig.CONFIG_DIR, 'config.json');
 
     // Default values
-    static DEFAULT_ENDPOINT = 'http://10.13.37.110:1234';
+    static DEFAULT_ENDPOINT = 'http://localhost:1234';
     static DEFAULT_CONTEXT_WINDOW = 131072;
     static DEFAULT_LIVEPRUNE = true;
     static DEFAULT_TEMPERATURE = 0.6;
