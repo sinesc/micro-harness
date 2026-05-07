@@ -77,6 +77,20 @@ export class Tool {
         {
             type: 'function',
             function: {
+                name: 'create_directory',
+                description: 'Create a new directory or ensure a directory exists.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        path: { type: 'string', description: 'Directory path' }
+                    },
+                    required: ['path']
+                }
+            }
+        },
+        {
+            type: 'function',
+            function: {
                 name: 'edit_file',
                 description: 'Replace an inclusive range of lines (start_line through end_line) with new content. To prevent accidental line removal, the replacement MUST include anchor lines above and/or below your changes that match the file exactly.',
                 parameters: {
@@ -301,6 +315,16 @@ export class Tool {
             return `Created file ${filePath} with ${content.split(/\r?\n/).length} line(s).`;
         } catch (err) {
             throw new ToolError(`Cannot create file '${filePath}': ${err.message}`);
+        }
+    }
+
+    async create_directory({ path: dirPath }) {
+        const resolvedPath = this._resolvePath(dirPath);
+        try {
+            await fs.mkdir(resolvedPath, { recursive: true });
+            return `Created directory ${dirPath}.`;
+        } catch (err) {
+            throw new ToolError(`Cannot create directory '${dirPath}': ${err.message}`);
         }
     }
 
@@ -891,6 +915,7 @@ export class Tool {
                 case 'list_files': return { result: await this.list_files(args), error: false, toolName: name };
                 case 'read_file': return { result: await this.read_file(args), error: false, toolName: name };
                 case 'create_file': return { result: await this.create_file(args), error: false, toolName: name };
+                case 'create_directory': return { result: await this.create_directory(args), error: false, toolName: name };
                 case 'edit_file': return { result: await this.edit_file(args), error: false, toolName: name };
                 case 'apply_preview': return { result: await this.apply_preview(args), error: false, toolName: name };
                 case 'undo': return { result: await this.undo(), error: false, toolName: name };
