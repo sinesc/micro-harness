@@ -374,7 +374,6 @@ export class MessageContext {
             const data = await fs.readFile(this.contextFile, 'utf-8');
             const parsed = JSON.parse(data);
             if (Array.isArray(parsed.messages) && Array.isArray(parsed.forgottenFiles)) {
-                console.log(`📂 Loaded context (${parsed.messages.length} messages)`);
                 this.messages = parsed.messages;
                 this.forgottenFiles = new Set(parsed.forgottenFiles);
                 return parsed;
@@ -394,7 +393,6 @@ export class MessageContext {
             const messages = this.messages.filter(m => m.role !== 'system');
             const forgottenFiles = Array.from(this.forgottenFiles);
             await fs.writeFile(this.contextFile, JSON.stringify({ messages, forgottenFiles }, null, 2), 'utf-8');
-            console.log(`💾 Saved context (${messages.length} messages)`);
         } catch (err) {
             console.log(`⚠️  Warning: Could not save context: ${err.message}`);
         }

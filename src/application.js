@@ -43,7 +43,7 @@ export class Application {
         this.rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         this.#setupSigintHandler();
 
-        console.log('🚀 LLM Coding Harness started. Enter your prompt or type "/help" for available commands.');
+        console.log('Micro-harness started. Enter your prompt or type "/help" for available commands.');
 
         while (true) {
             this.#displaySeparator('user');
@@ -77,7 +77,6 @@ export class Application {
                 selectedFile = mdFiles[mdFiles.length - 1];
             }
             await this.setSystemPrompt(selectedFile);
-            console.log(`✅ Loaded system prompt: ${selectedFile}`);
         } catch (err) {
             console.log(`⚠️ Could not load system prompt: ${err.message}`);
         }
