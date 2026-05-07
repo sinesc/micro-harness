@@ -14,7 +14,7 @@ export class Command {
     }
 
     async help() {
-        return `Available commands:\n/exit - Exit the harness\n/models - List available models\n/model <index or name> - Switch to a model\n/prompt [index or name] - List or set system prompt\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/config <setting> [ <value> ] - Get or set a config setting\n/reset - Clear current context (keeping only system prompt)`;
+        return `Available commands:\n/exit - Exit the harness\n/models [filter] - List available models, optionally filtered by name\n/model <index or name> - Switch to a model\n/prompt [index or name] - List or set system prompt\n/tool <name> <json args> - Execute a tool\n/context - Show context statistics\n/config <setting> [ <value> ] - Get or set a config setting\n/reset - Clear current context (keeping only system prompt)`;
     }
 
     async config(args) {
@@ -84,13 +84,22 @@ export class Command {
         await this.application.config.save();
     }
 
-    async models() {
+    async models(filter) {
         try {
             const res = await fetch(`${this.application.config.getEndpoint()}/v1/models`);
             if (!res.ok) throw new Error(`API error: ${res.status} ${res.statusText}`);
             const data = await res.json();
             const apiModels = (data.data?.map(m => m.id) || []).sort();
-            return `📋 Available Models:\n${apiModels.map((m, i) => `  ${i}. ${m}`).join('\n')}`;
+            const models = ['local-model', ...apiModels];
+
+            // Apply filter if provided
+            const filtered = filter ? models.filter(m => m.includes(filter)) : models;
+
+            return `Available Models:\n${filtered.map((m, i) => {
+                // Find the original index in the full list for stable indexing
+                const originalIndex = models.indexOf(m);
+                return `  ${originalIndex}. ${m}`;
+            }).join('\n')}`;
         } catch (err) {
             throw new CommandError(`Failed to fetch models: ${err.message}`);
         }
@@ -214,7 +223,7 @@ export class Command {
             case 'help':
                 return await this.help();
             case 'models':
-                return await this.models();
+                return await this.models(args);
             case 'model':
                 return await this.model(args);
             case 'prompt':
