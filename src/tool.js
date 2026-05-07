@@ -159,11 +159,11 @@ export class Tool {
             type: 'function',
             function: {
                 name: 'syntax_check',
-                description: 'Check JavaScript syntax using acorn. Returns success or error message. Only works for .js files.',
+                description: 'Check JavaScript syntax using acorn or PHP syntax using php -l. Returns success or error message. Works for .js and .php files.',
                 parameters: {
                     type: 'object',
                     properties: {
-                        path: { type: 'string', description: 'File path to check (must be a .js file)' }
+                        path: { type: 'string', description: 'File path to check (must be a .js or .php file)' }
                     },
                     required: ['path']
                 }
@@ -814,15 +814,47 @@ export class Tool {
     }
 
     async #check_file(content, filePath) {
-        const isJSFile = filePath.endsWith('.js');
-        if (!isJSFile) return null;
+        if (filePath.endsWith('.js')) {
+            return await this.#check_js_syntax(content, filePath);
+        }
+        if (filePath.endsWith('.php')) {
+            return await this.#check_php_syntax(content, filePath);
+        }
+        return null;
+    }
 
+    async #check_js_syntax(content, filePath) {
         const tmpFile = path.join(path.dirname(filePath), `.tmp_syntax_check_${Date.now()}.js`);
         try {
             await fs.writeFile(tmpFile, content, 'utf-8');
             let stderr;
             try {
                 let result = await execAsync(`acorn --module --ecma2024 --silent "${tmpFile}"`);
+                stderr = result.stderr;
+            } catch (e) {
+                if (e.stderr === undefined) {
+                    throw new Error('Failed to run external syntax check command');
+                }
+                stderr = e.stderr;
+            }
+            if (stderr) return stderr.replace(tmpFile, 'temp_file').trim();
+            return null;
+        } finally {
+            try {
+                await fs.unlink(tmpFile);
+            } catch (e) {
+                // Ignore cleanup errors
+            }
+        }
+    }
+
+    async #check_php_syntax(content, filePath) {
+        const tmpFile = path.join(path.dirname(filePath), `.tmp_syntax_check_${Date.now()}.php`);
+        try {
+            await fs.writeFile(tmpFile, content, 'utf-8');
+            let stderr;
+            try {
+                let result = await execAsync(`php -l "${tmpFile}"`);
                 stderr = result.stderr;
             } catch (e) {
                 if (e.stderr === undefined) {
