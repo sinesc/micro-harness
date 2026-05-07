@@ -257,15 +257,36 @@ export class Application {
     }
 
     // Returns handler to output streaming model response content. Each response needs a new handler.
-    #makeStreamHandler() {
+    #makeStreamHandler() { // TODO: refactor to class
         let firstContentChunk = true;
         let bufferedLeading = '';
         let bufferedTrailing = '';
-        let bufferedMarkdown = { content: null };
+        let bufferedMarkdown = { content: null, headline: false };
 
-        const bufferMarkdownChunks = (part) => {
+        const formatSpan = (content) => {
+            content = content.replace(/^\`(.*?)\`$/g, (_, m) => styleText(['yellow'], m));
+            content = content.replace(/^\*\*\*(.*?)\*\*\*$/g, (_, m) => styleText(['bold','italic'], m));
+            content = content.replace(/^\*\*(.*?)\*\*$/g, (_, m) => styleText(['bold'], m));
+            content = content.replace(/^\*(.*?)\*$/g, (_, m) => styleText(['italic'], m));
+            return content;
+        }
+
+        const printBufferedMarkdown = (part, start) => {
             const b = bufferedMarkdown;
             const SPANS = [ '`', '***', '**', '*' ]; // buffered until complete
+
+            // handle headlines without buffering
+            const headlineStart = start ? part.match(/^#/) : part.match(/^\s*?\n#/);
+            if (headlineStart) {
+                part = part.replace(/#.*?\n?/, r => {
+                    const reset = r.slice(r.length - 1) === "\n";
+                    b.headline = !reset;
+                    return '\x1b[36m' + r + (reset ? '\x1b[0m' : '');
+                });
+            } else if (b.headline && part.includes("\n")) {
+                part = part.replace("\n", "\x1b[0m\n");
+                b.headline = false;
+            }
 
             // start buffering when encountering potential span
             if (b.content !== null) {
@@ -282,7 +303,7 @@ export class Application {
                 const match = end > -1 ? b.content.slice(start, end + type.length) : null;
                 if (match !== null && match !== '**') { // ** when last chunk ended on * and current started with * then don't misinterpret ** as 0-length italic
                     const before = b.content.slice(0, start);
-                    process.stdout.write(before + this.#formatSpan(match));
+                    process.stdout.write(before + formatSpan(match));
                     // handle remainder after formatted part
                     const remainder = b.content.slice(end + type.length);
                     if (hasToken(remainder, SPANS)) {
@@ -309,7 +330,7 @@ export class Application {
                     if (trimmedStart.length > 0) {
                         this.#displaySeparator('assistant');
                         process.stdout.write(`${Application.TYPE_LABELS['assistant']} `);
-                        bufferMarkdownChunks(trimmedStart, true);
+                        printBufferedMarkdown(trimmedStart, true);
                         firstContentChunk = false;
                         bufferedLeading = '';
                     }
@@ -317,35 +338,26 @@ export class Application {
                     bufferedTrailing += chunk;
                     const trimmedEnd = bufferedTrailing.trimEnd();
                     if (trimmedEnd.length > 0) {
-                        bufferMarkdownChunks(trimmedEnd, false);
+                        printBufferedMarkdown(trimmedEnd, false);
                         bufferedTrailing = '';
                     }
                 }
             } else {
                 // handle trailing chunk if it contains content
                 const trimmedEnd = (bufferedMarkdown.content ?? '').trimEnd();
-                if (trimmedEnd !== '') {
+                if (trimmedEnd.length > 0) {
                     if (firstContentChunk) {
                         firstContentChunk = false;
                         process.stdout.write(`${Application.TYPE_LABELS['assistant']} `);
                     }
                     process.stdout.write(trimmedEnd);
                 }
-                // add style reset and newline if we got any content
+                // add style reset if we got any content
                 if (!firstContentChunk) {
                     process.stdout.write('\x1b[0m');
                 }
             }
         };
-    }
-
-    // Basic markdown rendering
-    #formatSpan(content) {
-        content = content.replace(/\`(.*?)\`/g, (_, m) => styleText(['yellow'], m));
-        content = content.replace(/\*\*\*(.*?)\*\*\*/g, (_, m) => styleText(['bold','italic'], m));
-        content = content.replace(/\*\*(.*?)\*\*/g, (_, m) => styleText(['bold'], m));
-        content = content.replace(/\*(.*?)\*/g, (_, m) => styleText(['italic'], m));
-        return content;
     }
 
     #displaySeparator(role) {
@@ -355,19 +367,10 @@ export class Application {
         }
     }
 
-    #displayMessage(role, content, color = null) {
-        content = (content || '').trim();
-        if (content === '') return;
-        content = this.#formatSpan(content);
-
-        const typeLabel = Application.TYPE_LABELS[role] || role;
-        let colorCode = '';
-        if (color === 'grey') colorCode = '\x1b[90m'; // TODO: cleanup: styleText
-        else if (color === 'red') colorCode = '\x1b[91m';
-        const resetCode = '\x1b[0m';
-
+    #displayMessage(role, content, style = []) {
         this.#displaySeparator(role);
-        console.log(`${typeLabel} ${colorCode}${content}${resetCode}`);
+        const typeLabel = Application.TYPE_LABELS[role] || role;
+        console.log(typeLabel + ' ' + styleText(style, content));
     }
 
     // Handle user input commands that start with '/'. Returns false if not a command, null to exit.
@@ -433,7 +436,7 @@ export class Application {
                 Object.entries(args).map(([k, v]) => [k, String(v).trim().length > 16 ? String(v).trim().slice(0, 16) + '...' : String(v).trim()])
             );
             const structuredResult = await this.tool.exec(tc.function.name, args);
-            this.#displayMessage('tool', `${tc.function.name} ${JSON.stringify(abbreviatedArgs).slice(1, -1)}`, structuredResult.error ? 'red' : 'grey');
+            this.#displayMessage('tool', `${tc.function.name} ${JSON.stringify(abbreviatedArgs).slice(1, -1)}`, [ structuredResult.error ? 'red' : 'grey' ]);
             this.context.push({ role: 'assistant', content: null, tool_calls: [tc] });
             // Store structured result error as metadata for live-pruning
             this.context.push({ role: 'tool', tool_call_id: tc.id, content: structuredResult.error ? 'ERROR: ' + structuredResult.result : structuredResult.result, _toolError: structuredResult.error });
