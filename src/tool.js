@@ -26,8 +26,6 @@ export class Tool {
         this.fileChecksums = new Map();
         // Files that have been successfully edited since the last read_file call
         this.filesDirtyAfterRead = new Set();
-        // Pending previews awaiting apply_preview: Map<id, pendingEdit>
-        this.pendingPreviews = new Map();
     }
 
     static TOOLS = [
@@ -92,37 +90,35 @@ export class Tool {
             type: 'function',
             function: {
                 name: 'edit_file',
-                description: 'Replace an inclusive range of lines (start_line through end_line) with new content. To prevent accidental line removal, the replacement MUST include anchor lines above and/or below your changes that match the file exactly.',
+                description: 'Replace ranges of lines with new content. Accepts an edits array so multiple file sections can be edited in one call. All line numbers in the edits array refer to the original file before this call. Changes are applied immediately; use the undo tool to revert if needed. Each edit MUST include unmodified anchor lines above and below the changed content.',
                 parameters: {
                     type: 'object',
                     properties: {
                         path: { type: 'string', description: 'File path' },
-                        start_line: {
-                            description: 'Start of the replacement range (1-indexed). Unless this is line 1 of the file, the first line of replacement must exactly match its current content.',
-                            type: 'integer',
-                        },
-                        end_line: {
-                            description: 'End of the replacement range (1-indexed). Unless this is the last line of the file, the last line of replacement must exactly match its current content.',
-                            type: 'integer',
-                        },
-                        replacement: { type: 'string', description: 'New content for the range. Must begin with the exact text of start_line (leading anchor) and end with the exact text of end_line (trailing anchor), unless those lines are at the file boundary.' },
-                        preview: { type: 'boolean', description: 'If true, return a preview of the edit without applying it. Returns a preview ID that can be passed to apply_preview to apply the edit.' }
+                        edits: {
+                            type: 'array',
+                            description: 'List of edits to apply. All line numbers reference the original file before this call.',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    start_line: {
+                                        type: 'integer',
+                                        description: 'Start of the replacement range (1-indexed). Unless line 1, the first line of replacement must exactly match the file content at that line (leading anchor).'
+                                    },
+                                    end_line: {
+                                        type: 'integer',
+                                        description: 'End of the replacement range (1-indexed). Unless last line, the last line of replacement must exactly match the file content at that line (trailing anchor).'
+                                    },
+                                    replacement: {
+                                        type: 'string',
+                                        description: 'New content for the range. Must begin with the exact text of start_line (leading anchor) and end with the exact text of end_line (trailing anchor), unless those lines are at the file boundary.'
+                                    }
+                                },
+                                required: ['start_line', 'end_line', 'replacement']
+                            }
+                        }
                     },
-                    required: ['path', 'start_line', 'end_line', 'replacement']
-                }
-            }
-        },
-        {
-            type: 'function',
-            function: {
-                name: 'apply_preview',
-                description: 'Apply a pending edit that was previously previewed by edit_file. Use the 8-character ID returned in the preview.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        id: { type: 'string', description: '8-character preview ID returned by edit_file' }
-                    },
-                    required: ['id']
+                    required: ['path', 'edits']
                 }
             }
         },
@@ -246,13 +242,6 @@ export class Tool {
             this.fileChecksums.set(resolvedPath, this.#computeChecksum(content));
             this.filesDirtyAfterRead.delete(resolvedPath);
 
-            // Invalidate any pending previews for this file
-            for (const [id, preview] of this.pendingPreviews) {
-                if (preview.filePath === resolvedPath) {
-                    this.pendingPreviews.delete(id);
-                }
-            }
-
             // Remove file from forgotten list so it can be read again
             const relativePath = path.relative(process.cwd(), resolvedPath);
             this.application.context.forgottenFiles.delete(relativePath);
@@ -330,7 +319,7 @@ export class Tool {
 
     async undo() {
         if (this.editHistory.length === 0) {
-            throw new ToolError('No edits to undo. Trying to undo a preview? Previews are not written to file until applied. There is nothing to undo yet.');
+            throw new ToolError('No edits to undo.');
         }
 
         const lastEdit = this.editHistory.pop();
@@ -408,49 +397,24 @@ export class Tool {
         return `${output}\n\n---\nTotal: ${total} match(es) found.`;
     }
 
-    async edit_file({ path: filePath, start_line, end_line, replacement, preview = false }) {
-        // --- Parameter validation ---
-        if (start_line === undefined || start_line === null)
-            throw new ToolError(`Specify 'start_line' for the edit.`);
-        if (end_line === undefined || end_line === null)
-            throw new ToolError(`Specify 'end_line' for the edit.`);
+    async edit_file({ path: filePath, edits }) {
         if (filePath === undefined || filePath === null)
             throw new ToolError(`Specify 'path' of the file to edit.`);
         if (typeof filePath !== 'string')
             throw new ToolError(`'path' must be a string.`);
-        if (replacement === undefined || replacement === null)
-            throw new ToolError(`Specify 'replacement' to perform.`);
-        if (typeof replacement !== 'string')
-            throw new ToolError(`'replacement' must be a string.`);
+        if (!Array.isArray(edits) || edits.length === 0)
+            throw new ToolError(`'edits' must be a non-empty array of edit objects.`);
 
-        const startLine = parseInt(start_line, 10);
-        const endLine = parseInt(end_line, 10);
-
-        if (isNaN(startLine))
-            throw new ToolError(`'start_line' must be an integer.`);
-        if (isNaN(endLine))
-            throw new ToolError(`'end_line' must be an integer.`);
-        if (startLine < 1)
-            throw new ToolError(`'start_line' must be >= 1.`);
-        if (endLine < 1)
-            throw new ToolError(`'end_line' must be >= 1.`);
-        if (startLine > endLine)
-            throw new ToolError(`'end_line' must be greater than 'start_line'.`);
-
-        // --- File read and checksum ---
         const resolvedPath = this._resolvePath(filePath);
 
-        // Check file existence before attempting to read
         try {
             const stats = await fs.stat(resolvedPath);
-            if (!stats.isFile()) {
+            if (!stats.isFile())
                 throw new ToolError(`'${filePath}' is not a file.`);
-            }
         } catch (err) {
             if (err instanceof ToolError) throw err;
-            if (err.code === 'ENOENT') {
+            if (err.code === 'ENOENT')
                 throw new ToolError(`File '${filePath}' does not exist. Create it first with create_file.`);
-            }
             throw new ToolError(`Cannot access file '${filePath}': ${err.message}`);
         }
 
@@ -461,157 +425,42 @@ export class Tool {
         if (previousChecksum && previousChecksum !== currentChecksum)
             throw new ToolError(`File '${filePath}' modified externally. Call read_file first, then retry the edit.`);
 
+        // Check for overlapping edits based on original line numbers
+        const sortedByStart = [...edits].sort((a, b) => (a.start_line || 0) - (b.start_line || 0));
+        for (let i = 0; i < sortedByStart.length - 1; i++) {
+            const curr = sortedByStart[i];
+            const next = sortedByStart[i + 1];
+            if ((curr.end_line || 0) > (next.start_line || 0))
+                throw new ToolError(
+                    `Overlapping edits: edit covering lines ${curr.start_line}-${curr.end_line} overlaps with edit covering lines ${next.start_line}-${next.end_line}.`
+                );
+        }
+
         const dirty = this.filesDirtyAfterRead.has(resolvedPath);
         const offsetMap = this.#getFileOffsetMap(resolvedPath);
         const lines = fileContent.split(/\r?\n/);
+        const originalLines = [...lines];
 
-        const actualStart = startLine + this.#getOffset(offsetMap, startLine);
-        if (actualStart < 1 || actualStart > lines.length)
-            throw new ToolError(`start_line out of bounds after previous edits. Re-read the file.`);
-        let startIdx = actualStart - 1;
-
-        const actualEnd = endLine + this.#getOffset(offsetMap, endLine);
-        if (actualEnd < 1 || actualEnd > lines.length)
-            throw new ToolError(`end_line out of bounds after previous edits. Re-read the file.`);
-        let endIdx = actualEnd - 1;
-
-        if (endIdx < startIdx)
-            throw new ToolError(`Range invalid after previous edits. Re-read the file.`);
-
-        // Strip one trailing newline before splitting so that a line-terminated
-        // replacement ("foo\n") is treated as one line, not two.
-        const newLines = replacement === '' ? [] : replacement.replace(/\r?\n$/, '').split(/\r?\n/); // TODO needs model response testing
-
-        const atBoundary = actualStart === 1 || actualEnd === lines.length;
-
-        if (newLines.length < 2 && !atBoundary) {
-            throw new ToolError(`Replacement MUST contain at least two lines: the top anchor line, optionally a replacement (omit to delete), the bottom anchor line.`);
-        }
-
-        if (actualEnd - actualStart < 1 && !atBoundary) {
-            throw new ToolError(`'end_line' must be greater than 'start_line' since the first and last line of your edit are REQUIRED to be unmodified anchor lines. If editing a single line, include the line above and below it in your edit.`);
-        }
-
-        // Anchor validation: the first/last lines of replacement must match the
-        // file at start_line/end_line to prevent silently dropping content.
-        // Anchors are waived at file boundaries.  Resolution priority per anchor:
-        //   1. exact at expected position  2. trim at expected position
-        //   3. exact fuzzy ±x lines        4. trim fuzzy ±x lines
-        const FUZZY_RADIUS = 10;
-        let endDelta = 0;
-        let startTrimFixed = false;
-        let endTrimFixed = false;
-        let startError = null;
-        let endError = null;
-
-        if (startIdx !== 0) {
-            if (newLines.length === 0)
-                throw new ToolError(
-                    `'replacement' is empty but 'start_line' ${startLine} is not the first line of the file.\n` +
-                    `The first line of 'replacement' must exactly match line ${actualStart} as a leading anchor:\n` +
-                    `  "${lines[startIdx]}"`
-                );
-            try {
-                ({ idx: startIdx, trimFixed: startTrimFixed } =
-                    this.#resolveAnchor(lines, newLines[0], startIdx, FUZZY_RADIUS, 'Leading', dirty));
-            } catch (e) {
-                startError = e;
-            }
-        }
-
-        if (endIdx !== lines.length - 1) {
-            if (newLines.length === 0)
-                throw new ToolError(
-                    `'replacement' is empty but 'end_line' ${endLine} is not the last line of the file.\n` +
-                    `The last line of 'replacement' must exactly match line ${actualEnd} as a trailing anchor:\n` +
-                    `  "${lines[endIdx]}"`
-                );
-            try {
-                ({ idx: endIdx, delta: endDelta, trimFixed: endTrimFixed } =
-                    this.#resolveAnchor(lines, newLines[newLines.length - 1], endIdx, FUZZY_RADIUS, 'Trailing', dirty));
-            } catch (e) {
-                endError = e;
-            }
-        }
-
-        // Both anchors failed — nothing to go on
-        if (startError && endError) throw startError;
-
-        // One anchor failed or preview requested — generate a preview rather than applying
-        if (startError || endError || preview) {
-            const newLinesForApply = [...newLines];
-            if (startTrimFixed) newLinesForApply[0] = lines[startIdx];
-            if (endTrimFixed) newLinesForApply[newLinesForApply.length - 1] = lines[endIdx];
-            let reason = (startError || endError)
-                ? 'One anchor matched but the other did not — check this preview for unintentionally duplicated/removed lines.'
-                : null;
-            const fullContentLines = [...lines.slice(0, startIdx), ...newLinesForApply, ...lines.slice(endIdx + 1)];
-            const fullContent = fullContentLines.join('\n');
-            const syntaxError = await this.#check_file(fullContent, resolvedPath);
-            if (syntaxError) {
-                reason = reason ? reason + '\n\n' : '';
-                reason += `Syntax error in the requested edit: ${syntaxError}`;
-            }
-
-            return this.#generatePreviewResponse(
-                filePath, fileContent, currentChecksum, lines, offsetMap,
-                startIdx, endIdx, newLinesForApply, startLine, endLine + endDelta, reason
-            );
-        }
-
-        // Restore correct whitespace in any trim-matched anchor lines so the file
-        // is not written back with the model's incorrect indentation.
-        if (startTrimFixed) newLines[0] = lines[startIdx];
-        if (endTrimFixed) newLines[newLines.length - 1] = lines[endIdx];
-
-        // Re-validate range after fuzzy corrections
-        if (endIdx < startIdx)
-            throw new ToolError(`Range invalid after previous edits. Re-read the file.`);
+        // Validate and prepare all edits against the original file before applying any
+        const preparedEdits = [];
+        for (const edit of edits)
+            preparedEdits.push(this.#validateAndPrepareEdit(lines, offsetMap, dirty, edit));
 
         this.editHistory.push({ path: resolvedPath, content: fileContent, offsetMap: new Map(offsetMap) });
 
-        this.#editSplice(offsetMap, lines, startIdx, endIdx - startIdx + 1, newLines, startLine, endLine + endDelta);
+        // Apply edits from bottom to top so earlier indices remain valid
+        const sortedByIdx = [...preparedEdits].sort((a, b) => b.startIdx - a.startIdx);
+        for (const { startIdx, endIdx, resolvedNewLines, startLine, logicalEndLine } of sortedByIdx)
+            this.#editSplice(offsetMap, lines, startIdx, endIdx - startIdx + 1, resolvedNewLines, startLine, logicalEndLine);
 
         const newContent = lines.join('\n');
         const syntaxError = await this.#check_file(newContent, resolvedPath);
-        if (syntaxError) {
-            const reason = `Syntax error in the requested edit: ${syntaxError}`;
-            return this.#generatePreviewResponse(
-                filePath, fileContent, currentChecksum, lines, offsetMap,
-                startIdx, endIdx, newLines, startLine, endLine + endDelta, reason
-            );
-        }
+
         await fs.writeFile(resolvedPath, newContent, 'utf-8');
         this.fileChecksums.set(resolvedPath, this.#computeChecksum(newContent));
         this.filesDirtyAfterRead.add(resolvedPath);
-        return 'Edit successful.';
-    }
 
-    async apply_preview({ id }) {
-        const pending = this.pendingPreviews.get(id);
-        if (!pending)
-            throw new ToolError(`No pending preview with id '${id}'. It may have already been applied or the id is incorrect.`);
-
-        const { filePath, fileContent, checksum, offsetMapSnapshot, startIdx, endIdx, newLines, startLine, logicalEndLine } = pending;
-
-        const currentContent = await fs.readFile(filePath, 'utf-8');
-        if (this.#computeChecksum(currentContent) !== checksum)
-            throw new ToolError(`File '${filePath}' changed since this preview was generated. Re-read the file and retry the edit.`);
-
-        const lines = currentContent.split(/\r?\n/);
-
-        this.fileOffsetMaps.set(filePath, new Map(offsetMapSnapshot));
-        const liveOffsetMap = this.fileOffsetMaps.get(filePath);
-
-        this.editHistory.push({ path: filePath, content: fileContent, offsetMap: new Map(offsetMapSnapshot) });
-        this.#editSplice(liveOffsetMap, lines, startIdx, endIdx - startIdx + 1, newLines, startLine, logicalEndLine);
-
-        const newContent = lines.join('\n');
-        await fs.writeFile(filePath, newContent, 'utf-8');
-        this.fileChecksums.set(filePath, this.#computeChecksum(newContent));
-        this.filesDirtyAfterRead.add(filePath);
-        this.pendingPreviews.delete(id);
-        return 'Edit successful.';
+        return this.#generateAppliedResponse(filePath, originalLines, preparedEdits, syntaxError);
     }
 
     async syntax_check({ path: filePath }) {
@@ -707,57 +556,147 @@ export class Tool {
         return offset;
     }
 
-    #generatePreviewResponse(filePath, fileContent, checksum, lines, offsetMap, startIdx, endIdx, newLines, startLine, logicalEndLine, reason) {
-        const id = crypto.randomUUID().split('-')[0];
+    #validateAndPrepareEdit(lines, offsetMap, dirty, edit) {
+        const { start_line, end_line, replacement } = edit;
 
-        this.pendingPreviews.set(id, {
-            filePath, fileContent, checksum,
-            offsetMapSnapshot: new Map(offsetMap),
-            startIdx, endIdx, newLines, startLine, logicalEndLine,
-        });
+        if (start_line === undefined || start_line === null)
+            throw new ToolError(`Each edit must specify 'start_line'.`);
+        if (end_line === undefined || end_line === null)
+            throw new ToolError(`Each edit must specify 'end_line'.`);
+        if (replacement === undefined || replacement === null)
+            throw new ToolError(`Each edit must specify 'replacement'.`);
+        if (typeof replacement !== 'string')
+            throw new ToolError(`'replacement' must be a string.`);
 
+        const startLine = parseInt(start_line, 10);
+        const endLine = parseInt(end_line, 10);
+
+        if (isNaN(startLine)) throw new ToolError(`'start_line' must be an integer.`);
+        if (isNaN(endLine)) throw new ToolError(`'end_line' must be an integer.`);
+        if (startLine < 1) throw new ToolError(`'start_line' must be >= 1.`);
+        if (endLine < 1) throw new ToolError(`'end_line' must be >= 1.`);
+        if (startLine > endLine) throw new ToolError(`'end_line' must be greater than 'start_line'.`);
+
+        const actualStart = startLine + this.#getOffset(offsetMap, startLine);
+        if (actualStart < 1 || actualStart > lines.length)
+            throw new ToolError(`start_line ${startLine} out of bounds after previous edits. Re-read the file.`);
+        let startIdx = actualStart - 1;
+
+        const actualEnd = endLine + this.#getOffset(offsetMap, endLine);
+        if (actualEnd < 1 || actualEnd > lines.length)
+            throw new ToolError(`end_line ${endLine} out of bounds after previous edits. Re-read the file.`);
+        let endIdx = actualEnd - 1;
+
+        if (endIdx < startIdx)
+            throw new ToolError(`Range invalid after previous edits. Re-read the file.`);
+
+        // Strip one trailing newline before splitting so that a line-terminated
+        // replacement ("foo\n") is treated as one line, not two.
+        const newLines = replacement === '' ? [] : replacement.replace(/\r?\n$/, '').split(/\r?\n/);
+        const atBoundary = actualStart === 1 || actualEnd === lines.length;
+
+        if (newLines.length < 2 && !atBoundary)
+            throw new ToolError(`Replacement MUST contain at least two lines: the top anchor line, optionally a replacement (omit to delete), the bottom anchor line.`);
+
+        if (actualEnd - actualStart < 1 && !atBoundary)
+            throw new ToolError(`'end_line' must be greater than 'start_line' since the first and last line of your edit are REQUIRED to be unmodified anchor lines. If editing a single line, include the line above and below it in your edit.`);
+
+        const FUZZY_RADIUS = 10;
+        let endDelta = 0;
+        let startTrimFixed = false;
+        let endTrimFixed = false;
+        let startError = null;
+        let endError = null;
+
+        if (startIdx !== 0) {
+            if (newLines.length === 0)
+                throw new ToolError(
+                    `'replacement' is empty but 'start_line' ${startLine} is not the first line of the file.\n` +
+                    `The first line of 'replacement' must exactly match line ${actualStart} as a leading anchor:\n` +
+                    `  "${lines[startIdx]}"`
+                );
+            try {
+                ({ idx: startIdx, trimFixed: startTrimFixed } =
+                    this.#resolveAnchor(lines, newLines[0], startIdx, FUZZY_RADIUS, 'Leading', dirty));
+            } catch (e) {
+                startError = e;
+            }
+        }
+
+        if (endIdx !== lines.length - 1) {
+            if (newLines.length === 0)
+                throw new ToolError(
+                    `'replacement' is empty but 'end_line' ${endLine} is not the last line of the file.\n` +
+                    `The last line of 'replacement' must exactly match line ${actualEnd} as a trailing anchor:\n` +
+                    `  "${lines[endIdx]}"`
+                );
+            try {
+                ({ idx: endIdx, delta: endDelta, trimFixed: endTrimFixed } =
+                    this.#resolveAnchor(lines, newLines[newLines.length - 1], endIdx, FUZZY_RADIUS, 'Trailing', dirty));
+            } catch (e) {
+                endError = e;
+            }
+        }
+
+        if (startError && endError) throw startError;
+
+        const warnings = [];
+        if (startError || endError)
+            warnings.push('One anchor matched but the other did not — verify the applied changes carefully.');
+
+        const resolvedNewLines = [...newLines];
+        if (startTrimFixed) resolvedNewLines[0] = lines[startIdx];
+        if (endTrimFixed) resolvedNewLines[resolvedNewLines.length - 1] = lines[endIdx];
+
+        if (endIdx < startIdx)
+            throw new ToolError(`Range invalid after anchor resolution. Re-read the file.`);
+
+        return { startIdx, endIdx, resolvedNewLines, startLine, logicalEndLine: endLine + endDelta, warnings };
+    }
+
+    #generateAppliedResponse(filePath, originalLines, preparedEdits, syntaxError) {
         const CONTEXT = 3;
         const MAX_CHANGED = 10;
         const half = Math.floor(MAX_CHANGED / 2);
 
         const output = [];
-        if (reason) output.push(reason + '\n');
-        output.push(`Preview [${id}]:\n`);
+        if (syntaxError)
+            output.push(`Warning: Syntax error detected: ${syntaxError}\n`);
 
-        // Context before
-        for (let i = Math.max(0, startIdx - CONTEXT); i < startIdx; i++)
-            output.push(`${i + 1}\t${lines[i]}`);
+        for (let i = 0; i < preparedEdits.length; i++) {
+            const { startIdx, endIdx, resolvedNewLines, warnings } = preparedEdits[i];
 
-        // Removed lines (old content)
-        /*const removedCount = endIdx - startIdx + 1;
-        if (removedCount <= MAX_CHANGED) {
-            for (let i = startIdx; i <= endIdx; i++)
-                output.push(`- ${i + 1} │ ${lines[i]}`);
-        } else {
-            for (let i = startIdx; i < startIdx + half; i++)
-                output.push(`- ${i + 1} │ ${lines[i]}`);
-            output.push(`- ... (${removedCount - MAX_CHANGED} more lines)`);
-            for (let i = endIdx - half + 1; i <= endIdx; i++)
-                output.push(`- ${i + 1} │ ${lines[i]}`);
-        }*/
+            if (preparedEdits.length > 1)
+                output.push(`Edit ${i + 1} of ${preparedEdits.length}:\n`);
 
-        // Added lines (new content)
-        if (newLines.length <= MAX_CHANGED) {
-            for (const l of newLines)
-                output.push(`+\t${l}`);
-        } else {
-            for (let i = 0; i < half; i++)
-                output.push(`+\t${newLines[i]}`);
-            output.push(`+ ... (${newLines.length - MAX_CHANGED} more lines)`);
-            for (let i = newLines.length - half; i < newLines.length; i++)
-                output.push(`+\t${newLines[i]}`);
+            for (const w of warnings)
+                output.push(w + '\n');
+
+            // Context before
+            for (let j = Math.max(0, startIdx - CONTEXT); j < startIdx; j++)
+                output.push(`${j + 1}\t${originalLines[j]}`);
+
+            // New content
+            if (resolvedNewLines.length <= MAX_CHANGED) {
+                for (const l of resolvedNewLines)
+                    output.push(`+\t${l}`);
+            } else {
+                for (let j = 0; j < half; j++)
+                    output.push(`+\t${resolvedNewLines[j]}`);
+                output.push(`+ ... (${resolvedNewLines.length - MAX_CHANGED} more lines)`);
+                for (let j = resolvedNewLines.length - half; j < resolvedNewLines.length; j++)
+                    output.push(`+\t${resolvedNewLines[j]}`);
+            }
+
+            // Context after
+            for (let j = endIdx + 1; j <= Math.min(originalLines.length - 1, endIdx + CONTEXT); j++)
+                output.push(`${j + 1}\t${originalLines[j]}`);
+
+            if (i < preparedEdits.length - 1)
+                output.push('');
         }
 
-        // Context after
-        for (let i = endIdx + 1; i <= Math.min(lines.length - 1, endIdx + CONTEXT); i++)
-            output.push(`${i + 1}\t${lines[i]}`);
-
-        output.push(`\nRetry your edit if this is not correct, otherwise call apply_preview {"id":"${id}"} to apply. This is a preview, file not yet modified!`);
+        output.push(`\nChanges applied to ${filePath}. Use the \`undo\` tool to revert if necessary.`);
         return output.join('\n');
     }
 
@@ -916,8 +855,7 @@ export class Tool {
                 case 'read_file': return { result: await this.read_file(args), error: false, toolName: name };
                 case 'create_file': return { result: await this.create_file(args), error: false, toolName: name };
                 case 'create_directory': return { result: await this.create_directory(args), error: false, toolName: name };
-                case 'edit_file': return { result: await this.edit_file(args), error: false, toolName: name };
-                case 'apply_preview': return { result: await this.apply_preview(args), error: false, toolName: name };
+                case 'edit_file': return { result: dump(await this.edit_file(args)), error: false, toolName: name };
                 case 'undo': return { result: await this.undo(), error: false, toolName: name };
                 case 'forget_file': return { result: await this.forget_file(args), error: false, toolName: name };
                 case 'search_files': return { result: await this.search_files(args), error: false, toolName: name };
@@ -928,6 +866,7 @@ export class Tool {
             }
         } catch (err) {
             if (err instanceof ToolError) {
+                console.log(err);
                 const call = JSON.stringify({ name, args });
                 if (call === this.lastErrorCall) {
                     return { result: "Identical tool call detected. Read the previous error message carefully, analyse the problem and make a correct tool call.", error: true, toolName: name };
