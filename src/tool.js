@@ -631,6 +631,16 @@ export class Tool {
         const MAX_CHANGED = 10;
         const half = Math.floor(MAX_CHANGED / 2);
 
+        const showLines = (lines, prefix, getLabel) => {
+            if (lines.length <= MAX_CHANGED) {
+                lines.forEach((l, i) => output.push(`${prefix}\t${getLabel ? getLabel(i) : ''}${l}`));
+            } else {
+                for (let i = 0; i < half; i++) output.push(`${prefix}\t${getLabel ? getLabel(i) : ''}${lines[i]}`);
+                output.push(`${prefix} ... (${lines.length - MAX_CHANGED} more lines)`);
+                for (let i = lines.length - half; i < lines.length; i++) output.push(`${prefix}\t${getLabel ? getLabel(i) : ''}${lines[i]}`);
+            }
+        };
+
         const output = [];
         if (syntaxError)
             output.push(`Warning: Syntax error detected: ${syntaxError}\n`);
@@ -645,17 +655,12 @@ export class Tool {
             for (let j = Math.max(0, startIdx - CONTEXT); j < startIdx; j++)
                 output.push(`${j + 1}\t${originalLines[j]}`);
 
-            // New content
-            if (resolvedNewLines.length <= MAX_CHANGED) {
-                for (const l of resolvedNewLines)
-                    output.push(`+\t${l}`);
-            } else {
-                for (let j = 0; j < half; j++)
-                    output.push(`+\t${resolvedNewLines[j]}`);
-                output.push(`+ ... (${resolvedNewLines.length - MAX_CHANGED} more lines)`);
-                for (let j = resolvedNewLines.length - half; j < resolvedNewLines.length; j++)
-                    output.push(`+\t${resolvedNewLines[j]}`);
-            }
+            // Removed lines
+            const removedLines = originalLines.slice(startIdx, endIdx + 1);
+            showLines(removedLines, '-', (i) => `${startIdx + i + 1}\t`);
+
+            // Added lines
+            showLines(resolvedNewLines, '+', null);
 
             // Context after
             for (let j = endIdx + 1; j <= Math.min(originalLines.length - 1, endIdx + CONTEXT); j++)
