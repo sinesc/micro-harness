@@ -12,12 +12,12 @@ IMPORTANT RULES:
 10. No UTF-8 special characters like → or — in code comments. Use -> or - instead.
 
 edit_file examples, file:
-\`\`\`
+```
 first
 second
 third
 fourth
-\`\`\`
+```
 
 To remove line "second": {"path":"<file>","start_line":1,"end_line":3,"replacement":"first\nthird"}
 To add lines between "second" and "third": {"path":"<file>","start_line":2,"end_line":3,"replacement":"second\na new line\nanother new line\nthird"}
