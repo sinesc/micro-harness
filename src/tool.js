@@ -90,7 +90,7 @@ export class Tool {
             type: 'function',
             function: {
                 name: 'edit_file',
-                description: 'Replace ranges of lines with new content. Accepts an edits array so multiple file sections can be edited in one call. All line numbers in the edits array refer to the original file before this call. Changes are applied immediately; use the undo tool to revert if needed. Each edit MUST include unmodified anchor lines above and below the changed content.',
+                description: 'Replace ranges of lines with new content. Accepts an edits array so multiple file sections can be edited in one call. All line numbers refer to the original file before this call. Changes are applied immediately; use the undo tool to revert if needed.',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -103,15 +103,15 @@ export class Tool {
                                 properties: {
                                     start_line: {
                                         type: 'integer',
-                                        description: 'Start of the replacement range (1-indexed). Unless line 1, the first line of replacement must exactly match the file content at that line (leading anchor).'
+                                        description: 'First line of the replacement range (1-indexed, inclusive).'
                                     },
                                     end_line: {
                                         type: 'integer',
-                                        description: 'End of the replacement range (1-indexed). Unless last line, the last line of replacement must exactly match the file content at that line (trailing anchor).'
+                                        description: 'Last line of the replacement range (1-indexed, inclusive).'
                                     },
                                     replacement: {
                                         type: 'string',
-                                        description: 'New content for the range. Must begin with the exact text of start_line (leading anchor) and end with the exact text of end_line (trailing anchor), unless those lines are at the file boundary.'
+                                        description: 'New content to replace lines start_line through end_line.'
                                     }
                                 },
                                 required: ['start_line', 'end_line', 'replacement']
@@ -593,56 +593,28 @@ export class Tool {
         // Strip one trailing newline before splitting so that a line-terminated
         // replacement ("foo\n") is treated as one line, not two.
         const newLines = replacement === '' ? [] : replacement.replace(/\r?\n$/, '').split(/\r?\n/);
-        const atBoundary = actualStart === 1 || actualEnd === lines.length;
-
-        if (newLines.length < 2 && !atBoundary)
-            throw new ToolError(`Replacement MUST contain at least two lines: the top anchor line, optionally a replacement (omit to delete), the bottom anchor line.`);
-
-        if (actualEnd - actualStart < 1 && !atBoundary)
-            throw new ToolError(`'end_line' must be greater than 'start_line' since the first and last line of your edit are REQUIRED to be unmodified anchor lines. If editing a single line, include the line above and below it in your edit.`);
 
         const FUZZY_RADIUS = 10;
         let endDelta = 0;
         let startTrimFixed = false;
         let endTrimFixed = false;
-        let startError = null;
-        let endError = null;
 
-        if (startIdx !== 0) {
-            if (newLines.length === 0)
-                throw new ToolError(
-                    `'replacement' is empty but 'start_line' ${startLine} is not the first line of the file.\n` +
-                    `The first line of 'replacement' must exactly match line ${actualStart} as a leading anchor:\n` +
-                    `  "${lines[startIdx]}"`
-                );
+        // Anchors are optional: if the first/last replacement line is found near the
+        // specified position, use that to refine the range; otherwise fall back to the
+        // specified line numbers as-is.
+        if (newLines.length > 0) {
             try {
                 ({ idx: startIdx, trimFixed: startTrimFixed } =
                     this.#resolveAnchor(lines, newLines[0], startIdx, FUZZY_RADIUS, 'Leading', dirty));
-            } catch (e) {
-                startError = e;
-            }
+            } catch (e) { /* fall back to specified line number */ }
         }
 
-        if (endIdx !== lines.length - 1) {
-            if (newLines.length === 0)
-                throw new ToolError(
-                    `'replacement' is empty but 'end_line' ${endLine} is not the last line of the file.\n` +
-                    `The last line of 'replacement' must exactly match line ${actualEnd} as a trailing anchor:\n` +
-                    `  "${lines[endIdx]}"`
-                );
+        if (newLines.length > 0) {
             try {
                 ({ idx: endIdx, delta: endDelta, trimFixed: endTrimFixed } =
                     this.#resolveAnchor(lines, newLines[newLines.length - 1], endIdx, FUZZY_RADIUS, 'Trailing', dirty));
-            } catch (e) {
-                endError = e;
-            }
+            } catch (e) { /* fall back to specified line number */ }
         }
-
-        if (startError && endError) throw startError;
-
-        const warnings = [];
-        if (startError || endError)
-            warnings.push('One anchor matched but the other did not — verify the applied changes carefully.');
 
         const resolvedNewLines = [...newLines];
         if (startTrimFixed) resolvedNewLines[0] = lines[startIdx];
@@ -651,7 +623,7 @@ export class Tool {
         if (endIdx < startIdx)
             throw new ToolError(`Range invalid after anchor resolution. Re-read the file.`);
 
-        return { startIdx, endIdx, resolvedNewLines, startLine, logicalEndLine: endLine + endDelta, warnings };
+        return { startIdx, endIdx, resolvedNewLines, startLine, logicalEndLine: endLine + endDelta };
     }
 
     #generateAppliedResponse(filePath, originalLines, preparedEdits, syntaxError) {
@@ -664,13 +636,10 @@ export class Tool {
             output.push(`Warning: Syntax error detected: ${syntaxError}\n`);
 
         for (let i = 0; i < preparedEdits.length; i++) {
-            const { startIdx, endIdx, resolvedNewLines, warnings } = preparedEdits[i];
+            const { startIdx, endIdx, resolvedNewLines } = preparedEdits[i];
 
             if (preparedEdits.length > 1)
                 output.push(`Edit ${i + 1} of ${preparedEdits.length}:\n`);
-
-            for (const w of warnings)
-                output.push(w + '\n');
 
             // Context before
             for (let j = Math.max(0, startIdx - CONTEXT); j < startIdx; j++)
