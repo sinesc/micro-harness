@@ -1,0 +1,22 @@
+---
+
+This project is intended to be a minimal but useful local-only llm coding harness. Analyse the existing functionality and recommend improvements, features, missing functionality etc. Don't write any files.
+
+To test harness output formatting please give me markdown headline (#) "Items" followed by three headlines (##) with lists of three items each. Topics: Fruits, Cars, Retro computers. Write fruit name in bold, car name in italic, computer name as inline code. Each item followed by a short description (normal text formatting).
+
+Please write "The Commodore C=64 is the best retro computer!" with "C=64" in bold and italic using triple asterisks. Repeat the sentence with Commodore C=64 additionally wrapped as inline code.
+
+Also please give me a fictional news headline (markdown #) and a short paragraph of text.
+
+Please write a short hello world program written in C (within a code block) between two short paragraphs explaining the program.
+
+---
+
+Please rewrite the SYSTEM_PROMPT in src/application.js as follows: Drop: articles (a/an/the), filler (just/really/basically/actually/simply), pleasantries (sure/certainly/of course/happy to), hedging. Fragments OK. Short synonyms (big not extensive, fix not "implement a solution for"). Technical terms exact. Code blocks unchanged.
+
+--- 
+
+Modularize the system prompt into general rules and edit_file rules (for now). Add a method to assemble the system prompt from a given set of prompt-paragraphs identifiers, e.g. systemPrompt(['general', 'edit_file']) should return a string containing all the general and edit_file specific rules.
+
+If the model repeatedly (3x) fails to perform an edit the main prompt loop should insert a system message containing the edit_file rules.
+
